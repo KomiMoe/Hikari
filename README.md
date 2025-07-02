@@ -1,6 +1,7 @@
 # Arkari
 Yet another llvm based obfuscator based on [goron](https://github.com/amimo/goron).
 
+## 介绍
 当前支持特性：
  - 混淆过程间相关
  - 间接跳转,并加密跳转目标(`-mllvm -irobf-indbr`)
@@ -140,6 +141,16 @@ Eg.间接函数调用,并加密目标函数地址,强度设置为3(`-mllvm -irob
 Thanks to [JetBrains](https://www.jetbrains.com/?from=KomiMoe) for providing free licenses such as [Resharper C++](https://www.jetbrains.com/resharper-cpp/?from=KomiMoe) for my open-source projects.
 
 [<img src="https://resources.jetbrains.com/storage/products/company/brand/logos/ReSharperCPP_icon.png" alt="ReSharper C++ logo." width=200>](https://www.jetbrains.com/resharper-cpp/?from=KomiMoe)
+
+## Star History
+
+<a href="https://www.star-history.com/#KomiMoe/Arkari&Date">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=KomiMoe/Arkari&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=KomiMoe/Arkari&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=KomiMoe/Arkari&type=Date" />
+ </picture>
+</a>
 
 ## 参考资源
 
