@@ -75,7 +75,7 @@ $ CFLAGS+="-mllvm -irobf -mllvm --irobf-indbr" or CXXFLAGS+="-mllvm -irobf -mllv
 $ ./configure
 $ make
 ```
-
+对于使用VisualStudio的项目，可以使用VisualStudio插件： https://github.com/KomiMoe/llvm2019
 ## 可以通过**annotate**对特定函数**开启/关闭**指定混淆选项：
 (Win64-19.1.0-rc3-obf1.5.0-rc2 or later)
 
