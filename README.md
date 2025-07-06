@@ -41,6 +41,27 @@ ninja install
 
 ```
 
+ - Windows with cmake for using clang(use Ninja, With vcpkg for libxml2 libLZMA, zlib ):
+```
+install ninja in your PATH
+run x64 Native Tools Command Prompt for VS 2022
+run:
+
+vcpkg install zlib:x64-windows-static
+vcpkg install libLZMA:x64-windows-static
+vcpkg install libxml2:x64-windows-static
+
+mkdir build_ninja
+cd build_ninja
+
+Replace "YOUR_VCPKG_TOOLCHAIN_FILE" to your vcpkg toolchain file (You can query it for command "vcpkg integrate install"):
+cmake -DCMAKE_CXX_FLAGS="/utf-8" -DCMAKE_INSTALL_PREFIX="./install" -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_PROJECTS="clang;lld;lldb" -DLLVM_ENABLE_LIBXML2=ON -DCMAKE_TOOLCHAIN_FILE=YOUR_VCPKG_TOOLCHAIN_FILE -DVCPKG_TARGET_TRIPLET="x64-windows-static" -G "Ninja" ../llvm
+
+ninja
+ninja install
+
+```
+
 ## 使用
 可通过编译选项开启相应混淆，如启用间接跳转混淆：
 
