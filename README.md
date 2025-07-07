@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/github/stars/KomiMoe/Arkari"/> 
  </a>
  <a href="https://github.com/KomiMoe/Arkari/LICENSE">
-  <img src="https://img.shields.io/github/license/KomiMoe/Arkari"/> 
+  <img src="https://img.shields.io/github/license/KomiMoe/Arkari?"/> 
  </a>
 </p>
 <p align="center">
