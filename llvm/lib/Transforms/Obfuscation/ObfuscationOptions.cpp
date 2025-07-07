@@ -7,6 +7,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/DiagnosticInfo.h"
+#include "llvm/Support/JSON.h"
 
 using namespace llvm;
 
@@ -45,7 +46,80 @@ SmallVector<std::string> readAnnotate(Function *f) {
   return annotations;
 }
 
-ObfOpt ObfuscationOptions::toObfuscate(const ObfOpt *option, Function *f) {
+std::shared_ptr<ObfuscationOptions> ObfuscationOptions::readConfigFile(
+    const Twine &FileName) {
+
+  std::shared_ptr<ObfuscationOptions> result = std::make_shared<
+    ObfuscationOptions>(
+      std::make_shared<ObfOpt>("indbr"),
+      std::make_shared<ObfOpt>("icall"),
+      std::make_shared<ObfOpt>("indgv"),
+      std::make_shared<ObfOpt>("fla"),
+      std::make_shared<ObfOpt>("cse"),
+      std::make_shared<ObfOpt>("cie"),
+      std::make_shared<ObfOpt>("cfe")
+      );
+  if (FileName.str().empty()) {
+    return result;
+  }
+  if (!sys::fs::exists(FileName)) {
+    report_fatal_error("Config file doesn't exist: " + FileName);
+  }
+
+  auto BufOrErr = MemoryBuffer::getFileOrSTDIN(FileName);
+  if (const auto ErrCode = BufOrErr.getError()) {
+    report_fatal_error(
+        ("Can not read config file: " + ErrCode.message()).c_str());
+  }
+
+  const auto &    buf = *BufOrErr.get();
+  llvm::SourceMgr sm;
+
+  auto jsonRoot = json::parse(buf.getBuffer());
+  if (!jsonRoot) {
+    report_fatal_error(jsonRoot.takeError());
+  }
+  auto rootObj = jsonRoot->getAsObject();
+  if (!rootObj) {
+    report_fatal_error("Json root is not an object.");
+  }
+
+  static auto procObj = [](const std::shared_ptr<ObfOpt> &obfOpt,
+                           const detail::DenseMapPair<
+                             json::ObjectKey, json::Value> &
+                           obj) {
+
+    static auto procOptValue = [](const std::shared_ptr<ObfOpt> &obfOpt,
+                                  const json::Value &            value) {
+      if (auto optObj = value.getAsObject()) {
+        if (auto enable = optObj->getBoolean("enable")) {
+          obfOpt->setEnable(enable.value());
+        }
+        if (auto level = optObj->getInteger("level")) {
+          obfOpt->setLevel(static_cast<uint32_t>(level.value()));
+        }
+      }
+    };
+
+    std::string key = obj.getFirst().str();
+    auto &      value = obj.getSecond();
+
+    if (key == obfOpt->attributeName()) {
+      procOptValue(obfOpt, value);
+      return;
+    }
+  };
+
+  SmallVector<std::shared_ptr<ObfOpt>> allOpt = result->getAllOpt();
+  for (auto &obj : *rootObj) {
+    for (auto &opt : allOpt) {
+      procObj(opt, obj);
+    }
+  }
+  return result;
+}
+
+ObfOpt ObfuscationOptions::toObfuscate(const std::shared_ptr<ObfOpt>& option, Function *f) {
   const auto attrEnable = "+" + option->attributeName();
   const auto attrDisable = "-" + option->attributeName();
   const auto attrLevel = "^" + option->attributeName();
@@ -111,9 +185,10 @@ ObfOpt ObfuscationOptions::toObfuscate(const ObfOpt *option, Function *f) {
           level = annotation[i] - '0';
           if (level < 0 || level > 9) {
             f->getContext().diagnose(DiagnosticInfoUnsupported{
-              *f,
-              f->getName() + ": " + annotation +
-              " unexpected character: " + std::string{annotation[i]} + ", sample: " + attrLevel + " = 0"});
+                *f,
+                f->getName() + ": " + annotation +
+                " unexpected character: " + std::string{annotation[i]} +
+                ", sample: " + attrLevel + " = 0"});
             return result.none();
           }
           break;
@@ -156,6 +231,5 @@ ObfOpt ObfuscationOptions::toObfuscate(const ObfOpt *option, Function *f) {
   }
   return result;
 }
-
 
 }
