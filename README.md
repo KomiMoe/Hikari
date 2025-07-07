@@ -1,5 +1,33 @@
-# Arkari
-Yet another llvm based obfuscator based on [goron](https://github.com/amimo/goron).
+
+<h1 align="center">Arkari</h1>
+<p align="center">
+ <a href="https://discord.gg/f5nDYjsrKZ">
+  <img width="180" src="https://discordapp.com/api/guilds/1391744742148145294/widget.png" />
+ </a>
+</p>
+<p align="center">
+ <a href="https://github.com/KomiMoe/Arkari/issues">
+  <img src="https://img.shields.io/github/issues/KomiMoe/Arkari"/> 
+ </a>
+ <a href="https://github.com/KomiMoe/Arkari/network/members">
+  <img src="https://img.shields.io/github/forks/KomiMoe/Arkari"/> 
+ </a>  
+ <a href="https://github.com/KomiMoe/Arkari/stargazers">
+  <img src="https://img.shields.io/github/stars/KomiMoe/Arkari"/> 
+ </a>
+ <a href="https://github.com/KomiMoe/Arkari/LICENSE">
+  <img src="https://img.shields.io/github/license/KomiMoe/Arkari"/> 
+ </a>
+</p>
+<p align="center">
+ <a helf="https://github.com/KomiMoe/Arkari/releases">
+  <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/KomiMoe/Arkari/total">
+ </a>
+ <a helf="https://github.com/KomiMoe/Arkari/releases">
+  <img alt="GitHub Release" src="https://img.shields.io/github/v/release/KomiMoe/Arkari">
+ </a>
+</p>
+<h3 align="center">Yet another llvm based obfuscator based on goron</h3>
 
 ## 介绍
 当前支持特性：
