@@ -6,6 +6,8 @@
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
 #include "llvm/IR/Module.h"
 
+#include <llvm/Transforms/Obfuscation/MicrosoftRTTIEraser.h>
+
 
 #define DEBUG_TYPE "ir-obfuscation"
 
@@ -78,6 +80,12 @@ static cl::opt<uint32_t> LevelIRConstantFPEncryption(
     "level-cfe", cl::init(0), cl::NotHidden,
     cl::desc("Set IR Constant FP Encryption Level."),
     cl::ZeroOrMore);
+
+
+static cl::opt<bool>
+EnableRttiEraser("irobf-rtti", cl::init(false), cl::NotHidden,
+  cl::desc("Enable RTTI Eraser."),
+  cl::ZeroOrMore);
 
 
 static cl::opt<std::string>
@@ -153,6 +161,7 @@ struct ObfuscationPassManager : public ModulePass {
                            LevelIRConstantIntEncryption);
     Opt->cfeOpt()->readOpt(EnableIRConstantFPEncryption,
                            LevelIRConstantFPEncryption);
+    Opt->rttiOpt()->readOpt(EnableRttiEraser);
     return Opt;
   }
 
@@ -161,7 +170,7 @@ struct ObfuscationPassManager : public ModulePass {
     if (EnableIndirectBr || EnableIndirectCall || EnableIndirectGV ||
         EnableIRFlattening || EnableIRStringEncryption ||
         EnableIRConstantIntEncryption || EnableIRConstantFPEncryption ||
-        !ArkariConfigPath.empty()) {
+        EnableRttiEraser || !ArkariConfigPath.empty()) {
       EnableIRObfuscation = true;
     }
 
@@ -178,6 +187,10 @@ struct ObfuscationPassManager : public ModulePass {
 
     if (EnableIRStringEncryption || Options->cseOpt()->isEnabled()) {
       add(llvm::createStringEncryptionPass(Options.get()));
+    }
+
+    if (EnableRttiEraser || Options->rttiOpt()->isEnabled()) {
+      add(llvm::createMsRttiEraserPass(Options.get()));
     }
 
     add(llvm::createFlatteningPass(pointerSize, Options.get()));

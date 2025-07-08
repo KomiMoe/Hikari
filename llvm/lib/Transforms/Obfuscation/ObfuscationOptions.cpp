@@ -50,15 +50,7 @@ std::shared_ptr<ObfuscationOptions> ObfuscationOptions::readConfigFile(
     const Twine &FileName) {
 
   std::shared_ptr<ObfuscationOptions> result = std::make_shared<
-    ObfuscationOptions>(
-      std::make_shared<ObfOpt>("indbr"),
-      std::make_shared<ObfOpt>("icall"),
-      std::make_shared<ObfOpt>("indgv"),
-      std::make_shared<ObfOpt>("fla"),
-      std::make_shared<ObfOpt>("cse"),
-      std::make_shared<ObfOpt>("cie"),
-      std::make_shared<ObfOpt>("cfe")
-      );
+    ObfuscationOptions>();
   if (FileName.str().empty()) {
     return result;
   }
@@ -87,7 +79,7 @@ std::shared_ptr<ObfuscationOptions> ObfuscationOptions::readConfigFile(
   static auto procObj = [](const std::shared_ptr<ObfOpt> &obfOpt,
                            const detail::DenseMapPair<
                              json::ObjectKey, json::Value> &
-                           obj) {
+                           obj) ->bool {
 
     static auto procOptValue = [](const std::shared_ptr<ObfOpt> &obfOpt,
                                   const json::Value &            value) {
@@ -106,20 +98,33 @@ std::shared_ptr<ObfuscationOptions> ObfuscationOptions::readConfigFile(
 
     if (key == obfOpt->attributeName()) {
       procOptValue(obfOpt, value);
-      return;
+      return true;
     }
+    return false;
   };
 
   SmallVector<std::shared_ptr<ObfOpt>> allOpt = result->getAllOpt();
   for (auto &obj : *rootObj) {
+    if (obj.getFirst().str() == "randomSeed") {
+      if (auto objStr = obj.getSecond().getAsString()) {
+        const auto &seedStr = objStr.value();
+        auto &seed = result->randomSeed();
+        seed = seedStr;
+        seed.resize(32, 0);
+      }
+      continue;
+    }
     for (auto &opt : allOpt) {
-      procObj(opt, obj);
+      if (procObj(opt, obj)) {
+        break;
+      }
     }
   }
   return result;
 }
 
-ObfOpt ObfuscationOptions::toObfuscate(const std::shared_ptr<ObfOpt>& option, Function *f) {
+ObfOpt ObfuscationOptions::toObfuscate(const std::shared_ptr<ObfOpt> &option,
+                                       Function *                     f) {
   const auto attrEnable = "+" + option->attributeName();
   const auto attrDisable = "-" + option->attributeName();
   const auto attrLevel = "^" + option->attributeName();

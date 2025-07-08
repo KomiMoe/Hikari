@@ -4,6 +4,7 @@
 #include "llvm/Support/YAMLParser.h"
 #include "llvm/IR/Function.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/ADT/SmallString.h"
 
 
 namespace llvm {
@@ -29,13 +30,14 @@ public:
     this->AttributeName = attributeName;
   }
 
-  void readOpt(const cl::opt<bool>& enableOpt) {
+  void readOpt(const cl::opt<bool> &enableOpt) {
     if (enableOpt.getNumOccurrences()) {
       Enabled = enableOpt.getValue();
     }
   }
 
-  void readOpt(const cl::opt<bool>& enableOpt, const cl::opt<uint32_t>& levelOpt) {
+  void readOpt(const cl::opt<bool> &    enableOpt,
+               const cl::opt<uint32_t> &levelOpt) {
     readOpt(enableOpt);
     if (levelOpt.getNumOccurrences()) {
       Level = levelOpt.getValue();
@@ -77,6 +79,9 @@ protected:
   std::shared_ptr<ObfOpt> CseOpt = nullptr;
   std::shared_ptr<ObfOpt> CieOpt = nullptr;
   std::shared_ptr<ObfOpt> CfeOpt = nullptr;
+  std::shared_ptr<ObfOpt> RttiOpt = nullptr;
+
+  SmallString<32> RandomSeed;
 
 public:
   SmallVector<std::shared_ptr<ObfOpt>> getAllOpt() const {
@@ -88,6 +93,7 @@ public:
     allOpt.push_back(CseOpt);
     allOpt.push_back(CieOpt);
     allOpt.push_back(CfeOpt);
+    allOpt.push_back(RttiOpt);
     return allOpt;
   }
 
@@ -97,7 +103,8 @@ public:
                      const std::shared_ptr<ObfOpt> &flaOpt,
                      const std::shared_ptr<ObfOpt> &cseOpt,
                      const std::shared_ptr<ObfOpt> &cieOpt,
-                     const std::shared_ptr<ObfOpt> &cfeOpt) {
+                     const std::shared_ptr<ObfOpt> &cfeOpt,
+                     const std::shared_ptr<ObfOpt> &rttiOpt) {
     this->IndBrOpt = indBrOpt;
     this->ICallOpt = iCallOpt;
     this->IndGvOpt = indGvOpt;
@@ -105,7 +112,19 @@ public:
     this->CseOpt = cseOpt;
     this->CieOpt = cieOpt;
     this->CfeOpt = cfeOpt;
+    this->RttiOpt = rttiOpt;
   }
+
+  ObfuscationOptions() : ObfuscationOptions{
+                           std::make_shared<ObfOpt>("indbr"),
+                           std::make_shared<ObfOpt>("icall"),
+                           std::make_shared<ObfOpt>("indgv"),
+                           std::make_shared<ObfOpt>("fla"),
+                           std::make_shared<ObfOpt>("cse"),
+                           std::make_shared<ObfOpt>("cie"),
+                           std::make_shared<ObfOpt>("cfe"),
+                           std::make_shared<ObfOpt>("rtti")
+                       } {}
 
   auto indBrOpt() const {
     return IndBrOpt;
@@ -135,10 +154,18 @@ public:
     return CfeOpt;
   }
 
-  static std::shared_ptr<ObfuscationOptions> readConfigFile(
-      const Twine& FileName);
+  auto rttiOpt() const {
+    return RttiOpt;
+  }
 
-  static ObfOpt toObfuscate(const std::shared_ptr<ObfOpt>& option, Function* f);
+  auto &randomSeed() {
+    return RandomSeed;
+  }
+
+  static std::shared_ptr<ObfuscationOptions> readConfigFile(
+      const Twine &FileName);
+
+  static ObfOpt toObfuscate(const std::shared_ptr<ObfOpt> &option, Function *f);
 
 };
 
