@@ -85,12 +85,22 @@ parser.add_argument("--files", nargs="+", type=str)
 args = parser.parse_args()
 
 gh = github.Github(args.token)
-komimoe = gh.get_user("KomiMoe")
-llvm_repo = komimoe.get_repo("llvm-project")
+llvm_org = gh.get_organization("llvm")
+llvm_repo = llvm_org.get_repo("llvm-project")
 
 if args.user:
     if not args.user_token:
         print("--user-token option required when --user is used")
+        sys.exit(1)
+    # Validate that this user is allowed to modify releases.
+    user = gh.get_user(args.user)
+    team = (
+        github.Github(args.user_token)
+        .get_organization("llvm")
+        .get_team_by_slug("llvm-release-managers")
+    )
+    if not team.has_in_members(user):
+        print("User {} is not a allowed to modify releases".format(args.user))
         sys.exit(1)
 elif args.command == "check-permissions":
     print("--user option required for check-permissions")

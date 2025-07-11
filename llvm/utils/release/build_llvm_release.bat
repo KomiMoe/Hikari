@@ -5,7 +5,7 @@ goto begin
 
 :usage
 echo Script for building the LLVM installer on Windows,
-echo used for the releases at https://github.com/KomiMoe/Arkari/releases
+echo used for the releases at https://github.com/llvm/llvm-project/releases
 echo.
 echo Usage: build_llvm_release.bat --version ^<version^> [--x86,--x64, --arm64] [--skip-checkout] [--local-python]
 echo.
@@ -134,7 +134,7 @@ if "%skip-checkout%" == "true" (
   set llvm_src=%~dp0..\..\..
 ) else (
   echo Checking out %revision%
-  curl -L https://github.com/KomiMoe/Arkari/archive/%revision%.zip -o src.zip || exit /b 1
+  curl -L https://github.com/llvm/llvm-project/archive/%revision%.zip -o src.zip || exit /b 1
   7z x src.zip || exit /b 1
   mv llvm-project-* llvm-project || exit /b 1
   set llvm_src=%build_dir%\llvm-project

@@ -92,7 +92,7 @@ if [ -n "$release" ]; then
   fi
   mkdir -p llvm-project
   pushd llvm-project
-  curl -L https://github.com/KomiMoe/Arkari/archive/$git_ref.tar.gz | tar --strip-components=1 -xzf -
+  curl -L https://github.com/llvm/llvm-project/archive/$git_ref.tar.gz | tar --strip-components=1 -xzf -
   popd
   srcdir="./llvm-project/llvm"
 fi
