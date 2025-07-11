@@ -50,7 +50,7 @@ jobs:
   prepare:
     name: Prepare to build binaries
     runs-on: ${{ inputs.runs-on }}
-    if: github.repository_owner == 'KomiMoe'
+    if: github.repository_owner == 'llvm'
     outputs:
       release-version: ${{ steps.vars.outputs.release-version }}
       ref: ${{ steps.vars.outputs.ref }}
@@ -188,7 +188,7 @@ jobs:
   build-release-package:
     name: "Build Release Package"
     needs: prepare
-    if: github.repository_owner == 'KomiMoe'
+    if: github.repository_owner == 'llvm'
     runs-on: ${{ needs.prepare.outputs.build-runs-on }}
     steps:
 
@@ -332,7 +332,7 @@ jobs:
       - prepare
       - build-release-package
     if: >-
-      github.repository_owner == 'KomiMoe'
+      github.repository_owner == 'llvm'
     runs-on: ${{ needs.prepare.outputs.test-runs-on }}
     steps:
     - name: Checkout Actions

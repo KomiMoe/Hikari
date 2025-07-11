@@ -13,7 +13,7 @@ jobs:
   validate-tag:
     name: Validate Tag
     runs-on: ubuntu-latest
-    if: github.repository == 'KomiMoe/Arkari'
+    if: github.repository == 'llvm/llvm-project'
     outputs:
       release-version: ${{ steps.validate-tag.outputs.release-version }}
     steps:
