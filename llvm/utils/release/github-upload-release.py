@@ -30,7 +30,6 @@
 
 import argparse
 import github
-from github import GithubException
 import sys
 from textwrap import dedent
 
@@ -85,13 +84,9 @@ parser.add_argument("--files", nargs="+", type=str)
 
 args = parser.parse_args()
 
-try:
-    gh = github.Github(args.token)
-    komimoe = gh.get_user("KomiMoe")
-    llvm_repo = komimoe.get_repo("Arkari")
-except GithubException as e:
-    print("no repo exist.")
-    sys.exit(1)
+gh = github.Github(args.token)
+komimoe = gh.get_user("KomiMoe")
+llvm_repo = komimoe.get_repo("llvm-project")
 
 if args.user:
     if not args.user_token:
