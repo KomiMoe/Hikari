@@ -512,7 +512,7 @@ void UnwrappedLineParser::calculateBraceTypes(bool ExpectClassBody) {
           break;
         do {
           NextTok = Tokens->getNextToken();
-        } while (NextTok->NewlinesBefore == 0 && NextTok->isNot(tok::eof));
+        } while (!NextTok->HasUnescapedNewline && NextTok->isNot(tok::eof));
 
         while (NextTok->is(tok::comment))
           NextTok = Tokens->getNextToken();
@@ -2086,7 +2086,8 @@ void UnwrappedLineParser::parseStructuralElement(
     case tok::kw_switch:
       if (Style.Language == FormatStyle::LK_Java)
         parseSwitch(/*IsExpr=*/true);
-      nextToken();
+      else
+        nextToken();
       break;
     case tok::kw_case:
       // Proto: there are no switch/case statements.
@@ -2637,7 +2638,10 @@ bool UnwrappedLineParser::parseParens(TokenType AmpAmpTokenType) {
         nextToken();
       break;
     case tok::kw_switch:
-      parseSwitch(/*IsExpr=*/true);
+      if (Style.Language == FormatStyle::LK_Java)
+        parseSwitch(/*IsExpr=*/true);
+      else
+        nextToken();
       break;
     case tok::kw_requires: {
       auto RequiresToken = FormatTok;
