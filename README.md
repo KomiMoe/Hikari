@@ -39,7 +39,9 @@
  - 过程相关控制流平坦混淆(`-mllvm -irobf-cff`)
  - 整数常量加密(`-mllvm -irobf-cie`) (Win64-MT-19.1.3-obf1.6.0 or later)
  - 浮点常量加密(`-mllvm -irobf-cfe`) (Win64-MT-19.1.3-obf1.6.0 or later)
- - 全部 (`-mllvm -irobf-indbr -mllvm -irobf-icall -mllvm -irobf-indgv -mllvm -irobf-cse -mllvm -irobf-cff -mllvm -irobf-cie -mllvm -irobf-cfe`)
+ - Microsoft CXXABI RTTI Name 擦除器 (实验性功能!) [需要指定配置文件路径 以及 配置文件`randomSeed`字段(32字节，不足会在后面补0，超过会截断)] (`-mllvm -irobf-rtti`) (Win64-MT-20.1.7-obf1.7.0 or later)
+ - 全部 (`-mllvm -irobf-indbr -mllvm -irobf-icall -mllvm -irobf-indgv -mllvm -irobf-cse -mllvm -irobf-cff -mllvm -irobf-cie -mllvm -irobf-cfe -mllvm -irobf-rtti`)
+ - 或直接通过配置文件管理(`-mllvm -arkari-cfg="配置文件路径|Your config path"`) (Win64-MT-20.1.7-obf1.7.0 or later)
 
 对比于goron的改进：
  - 由于作者明确表示暂时(至少几万年吧)不会跟进llvm版本和不会继续更新. 所以有了这个版本(https://github.com/amimo/goron/issues/29)
@@ -104,6 +106,8 @@ $ ./configure
 $ make
 ```
 对于使用VisualStudio的项目，可以使用VisualStudio插件： https://github.com/KomiMoe/llvm2019
+
+
 ## 可以通过**annotate**对特定函数**开启/关闭**指定混淆选项：
 (Win64-19.1.0-rc3-obf1.5.0-rc2 or later)
 
@@ -185,11 +189,60 @@ int main() {
 
 Eg.间接函数调用,并加密目标函数地址,强度设置为3(`-mllvm -irobf-icall -mllvm -level-icall=3`)
 
+
+## 通过配置文件管理混淆参数
+(Win64-MT-20.1.7-obf1.7.0 or later)
+
+编译参数加上：`-mllvm -arkari-cfg="配置文件路径|Your config path"` 
+
+路径可以是绝对路径，或者相对于编译器工作目录的相对路径
+
+配置文件格式为json
+
+Eg :
+```json
+{
+  "randomSeed": "zX0^bS5|vP0@xO4+sF3[pX8,fG2^rT9?",
+  "indbr": {
+    "enable": true,
+    "level": 3
+  },
+  "icall": {
+    "enable": true,
+    "level": 3
+  },
+  "indgv": {
+    "enable": true,
+    "level": 3
+  },
+  "cie": {
+    "enable": true,
+    "level": 3
+  },
+  "cfe": {
+    "enable": true,
+    "level": 3
+  },
+  "fla": {
+    "enable": true
+  },
+  "cse": {
+    "enable": true
+  },
+  "rtti": {
+    "enable": true
+  }
+}
+
+```
+
 ## Acknowledgements
 
 Thanks to [JetBrains](https://www.jetbrains.com/?from=KomiMoe) for providing free licenses such as [Resharper C++](https://www.jetbrains.com/resharper-cpp/?from=KomiMoe) for my open-source projects.
 
 [<img src="https://resources.jetbrains.com/storage/products/company/brand/logos/ReSharperCPP_icon.png" alt="ReSharper C++ logo." width=200>](https://www.jetbrains.com/resharper-cpp/?from=KomiMoe)
+
+
 
 ## Star History
 
