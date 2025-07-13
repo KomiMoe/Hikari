@@ -114,10 +114,15 @@ std::shared_ptr<ObfuscationOptions> ObfuscationOptions::readConfigFile(
       }
       continue;
     }
+    bool objHit = false;
     for (auto &opt : allOpt) {
-      if (procObj(opt, obj)) {
+      if ((objHit = procObj(opt, obj))) {
         break;
       }
+    }
+    if (!objHit) {
+      llvm::errs() << "warning: unknown arkari config node: "
+        << obj.getFirst().str() << '\n';
     }
   }
   return result;
