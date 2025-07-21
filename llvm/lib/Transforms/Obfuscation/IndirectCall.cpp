@@ -7,6 +7,7 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/IR/Module.h"
+#include "llvm/ADT/APInt.h"
 
 #include <random>
 
@@ -112,9 +113,8 @@ struct IndirectCall : public FunctionPass {
       std::vector<Constant *> ConstantCalleeIndex;
       for (unsigned j = 0; j < Callees.size(); ++j) {
         auto Callee = Callees[j];
-        auto preIndex = CalleeIndex[Callee];
-        auto count = j % 32;
-        preIndex = preIndex << count | preIndex >> (32 - count);
+        APInt preIndex(32, CalleeIndex[Callee]);
+        preIndex = preIndex.rotl(j);
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
         toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
         toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
@@ -169,12 +169,12 @@ struct IndirectCall : public FunctionPass {
       std::vector<Constant *> ConstantCalleeIndex;
       for (unsigned j = 0; j < FuncCallees.size(); ++j) {
         auto Callee = FuncCallees[j];
-        auto preIndex = FuncCalleeIndex.find(Callee) == FuncCalleeIndex.end() ?
-                          CalleeIndex[Callee] :
-                          FuncCalleeIndex[Callee];
 
-        auto count = j % 32;
-        preIndex = preIndex >> count | preIndex << (32 - count);
+        APInt preIndex(32, FuncCalleeIndex.find(Callee) == FuncCalleeIndex.end() ?
+                             CalleeIndex[Callee] :
+                             FuncCalleeIndex[Callee]);
+
+        preIndex = preIndex.rotr(j);
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
         toWriteData = ConstantExpr::getXor(toWriteData, FuncKey);
         if (opt.level() > 1) {

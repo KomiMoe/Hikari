@@ -7,6 +7,7 @@
 #include "llvm/CryptoUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 #include "llvm/IR/Module.h"
+#include "llvm/ADT/APInt.h"
 
 #include <random>
 
@@ -113,9 +114,8 @@ struct IndirectGlobalVariable : public FunctionPass {
       std::vector<Constant *> ConstantGVIndex;
       for (unsigned j = 0; j < GlobalVariables.size(); ++j) {
         auto GV = GlobalVariables[j];
-        auto preIndex = GVIndex[GV];
-        auto count = j % 32;
-        preIndex = preIndex << count | preIndex >> (32 - count);
+        APInt preIndex(32, GVIndex[GV]);
+        preIndex = preIndex.rotl(j);
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
         toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
         toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
@@ -170,12 +170,12 @@ struct IndirectGlobalVariable : public FunctionPass {
       std::vector<Constant *> ConstantGVIndex;
       for (unsigned j = 0; j < FuncGVs.size(); ++j) {
         auto GV = FuncGVs[j];
-        auto preIndex = FuncGVIndex.find(GV) == FuncGVIndex.end() ?
-                          GVIndex[GV] :
-                          FuncGVIndex[GV];
 
-        auto count = j % 32;
-        preIndex = preIndex >> count | preIndex << (32 - count);
+        APInt preIndex(32, FuncGVIndex.find(GV) == FuncGVIndex.end() ?
+                             GVIndex[GV] :
+                             FuncGVIndex[GV]);
+        
+        preIndex = preIndex.rotr(j);
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
         toWriteData = ConstantExpr::getXor(toWriteData, FuncKey);
         if (opt.level() > 1) {
