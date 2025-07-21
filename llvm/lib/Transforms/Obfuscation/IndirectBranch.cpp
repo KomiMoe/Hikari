@@ -20,9 +20,14 @@ struct IndirectBranch : public FunctionPass {
   static char ID;
   
   ObfuscationOptions *ArgsOptions;
-  std::map<BasicBlock *, unsigned> BBNumbering;
+  std::map<BasicBlock *, unsigned> BBIndex;
+  std::vector<GlobalVariable *> BBPage;
+  std::map<Function *, std::vector<BasicBlock *>> FunctionBBs;
+  std::map<Function *, std::vector<BranchInst *>> FunctionBrs;
   std::vector<BasicBlock *> BBTargets;        //all conditional branch targets
   CryptoUtils RandomEngine;
+  Constant *ModuleKey = nullptr;
+  bool RunOnFuncChanged = false;
 
   IndirectBranch(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
     this->pointerSize = pointerSize;
@@ -31,270 +36,235 @@ struct IndirectBranch : public FunctionPass {
 
   StringRef getPassName() const override { return {"IndirectBranch"}; }
 
-  void NumberBasicBlock(Function &F) {
-    for (auto &BB : F) {
-      if (auto *BI = dyn_cast<BranchInst>(BB.getTerminator())) {
-        if (BI->isConditional()) {
-          unsigned N = BI->getNumSuccessors();
-          for (unsigned I = 0; I < N; I++) {
-            BasicBlock *Succ = BI->getSuccessor(I);
-            if (BBNumbering.count(Succ) == 0) {
-              BBTargets.push_back(Succ);
-              BBNumbering[Succ] = 0;
+  void NumberBasicBlock(Module &M) {
+    for (auto &F : M) {
+      if (F.empty() || F.hasLinkOnceLinkage() || F.getSection() == ".text.startup") {
+        continue;
+      }
+      SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(nullptr, nullptr));
+      for (auto &BB : F) {
+        if (auto *BI = dyn_cast<BranchInst>(BB.getTerminator())) {
+          if (BI->isConditional()) {
+            FunctionBrs[&F].push_back(BI);
+            unsigned N = BI->getNumSuccessors();
+            for (unsigned I = 0; I < N; I++) {
+              BasicBlock *Succ = BI->getSuccessor(I);
+              if (std::find(FunctionBBs[&F].begin(), FunctionBBs[&F].end(), Succ)
+                  == FunctionBBs[&F].end()) {
+                FunctionBBs[&F].push_back(Succ);
+              }
+              if (BBIndex.count(Succ) == 0) {
+                BBTargets.push_back(Succ);
+                BBIndex[Succ] = 0;
+              }
             }
           }
         }
       }
     }
+  }
 
-    long seed = RandomEngine.get_uint32_t();
+  bool doInitialization(Module &M) override {
+    BBIndex.clear();
+    BBPage.clear();
+    FunctionBBs.clear();
+    FunctionBrs.clear();
+    BBTargets.clear();
+
+    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
+    ModuleKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
+    NumberBasicBlock(M);
+    if (BBTargets.empty()) {
+      return false;
+    }
+
+    auto seed = RandomEngine.get_uint64_t();
     std::default_random_engine e(seed);
     std::shuffle(BBTargets.begin(), BBTargets.end(), e);
 
-    unsigned N = 0;
-    for (auto BB:BBTargets) {
-      BBNumbering[BB] = N++;
-    }
-  }
-
-  GlobalVariable *getIndirectTargets0(Function &F, ConstantInt *EncKey) const {
-    std::string GVName(F.getName().str() + "_IndirectBrTargets");
-    GlobalVariable *GV = F.getParent()->getNamedGlobal(GVName);
-    if (GV)
-      return GV;
-
-    // encrypt branch targets
-    std::vector<Constant *> Elements;
-    for (const auto BB:BBTargets) {
-      Constant *CE = ConstantExpr::getBitCast(BlockAddress::get(BB), PointerType::getUnqual(F.getContext()));
-      CE = ConstantExpr::getGetElementPtr(Type::getInt8Ty(F.getContext()), CE, EncKey);
-      Elements.push_back(CE);
+    std::vector<Constant *> GVBBs;
+    for (unsigned i = 0; i < BBTargets.size(); ++i) {
+      auto BB = BBTargets[i];
+      GVBBs.push_back(ConstantExpr::getBitCast(BlockAddress::get(BB), PointerType::getUnqual(M.getContext())));
+      BBIndex[BB] = i;
     }
 
-    ArrayType *ATy =
-        ArrayType::get(PointerType::getUnqual(F.getContext()), Elements.size());
-    Constant *CA = ConstantArray::get(ATy, ArrayRef<Constant *>(Elements));
-    GV = new GlobalVariable(*F.getParent(), ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-                                               CA, GVName);
-    appendToCompilerUsed(*F.getParent(), {GV});
-    return GV;
-  }
-
-  GlobalVariable *getIndirectTargets1(Function &F, ConstantInt *AddKey, ConstantInt *XorKey) const {
-    std::string GVName(F.getName().str() + "_IndirectBrTargets1");
-    GlobalVariable *GV = F.getParent()->getNamedGlobal(GVName);
-    if (GV)
-      return GV;
-
-    // encrypt branch targets
-    std::vector<Constant *> Elements;
-    for (const auto BB:BBTargets) {
-      Constant *CE = ConstantExpr::getBitCast(BlockAddress::get(BB), PointerType::getUnqual(F.getContext()));
-      CE = ConstantExpr::getGetElementPtr(Type::getInt8Ty(F.getContext()), CE, ConstantExpr::getXor(AddKey, XorKey));
-      Elements.push_back(CE);
+    {
+      std::string GVNameBBs(M.getName().str() + "_IndirectBBs");
+      ArrayType *ATy = ArrayType::get(GVBBs[0]->getType(), GVBBs.size());
+      Constant *CA = ConstantArray::get(ATy, ArrayRef(GVBBs));
+      auto GV = new GlobalVariable(M, ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
+                                   CA, GVNameBBs);
+      BBPage.push_back(GV);
     }
 
-    ArrayType *ATy =
-      ArrayType::get(PointerType::getUnqual(F.getContext()), Elements.size());
-    Constant *CA = ConstantArray::get(ATy, ArrayRef<Constant *>(Elements));
-    GV = new GlobalVariable(*F.getParent(), ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-      CA, GVName);
-    appendToCompilerUsed(*F.getParent(), {GV});
-    return GV;
-  }
+    for (unsigned i = 0; i < 1; ++i) {
+      seed = RandomEngine.get_uint64_t();
+      e = std::default_random_engine(seed);
+      std::shuffle(BBTargets.begin(), BBTargets.end(), e);
 
-  GlobalVariable *getIndirectTargets2(Function &F, ConstantInt *AddKey, ConstantInt *XorKey) {
-    std::string GVName(F.getName().str() + "_IndirectBrTargets2");
-    GlobalVariable *GV = F.getParent()->getNamedGlobal(GVName);
-    if (GV)
-      return GV;
+      std::vector<Constant *> ConstantBBIndex;
+      for (unsigned j = 0; j < BBTargets.size(); ++j) {
+        auto BB = BBTargets[j];
+        APInt preIndex(32, BBIndex[BB]);
+        preIndex = preIndex.rotl(j);
+        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
+        toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
+        toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
+        ConstantBBIndex.push_back(toWriteData);
+        BBIndex[BB] = j;
+      }
 
-    auto& Ctx = F.getContext();
-    IntegerType *intType = Type::getInt32Ty(Ctx);
-    if (pointerSize == 8) {
-      intType = Type::getInt64Ty(Ctx);
-    }
-    // encrypt branch targets
-    std::vector<Constant *> Elements;
-    for (auto BB:BBTargets) {
-      Constant *CE = ConstantExpr::getBitCast(BlockAddress::get(BB), PointerType::getUnqual(F.getContext()));
-      CE = ConstantExpr::getGetElementPtr(Type::getInt8Ty(F.getContext()), CE, ConstantExpr::getXor(AddKey, ConstantExpr::getMul(XorKey, ConstantInt::get(intType, BBNumbering[BB], false))));
-      Elements.push_back(CE);
-    }
+      {
 
-    ArrayType *ATy =
-      ArrayType::get(PointerType::getUnqual(F.getContext()), Elements.size());
-    Constant *CA = ConstantArray::get(ATy, ArrayRef<Constant *>(Elements));
-    GV = new GlobalVariable(*F.getParent(), ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-      CA, GVName);
-    appendToCompilerUsed(*F.getParent(), {GV});
-    return GV;
-  }
-
-  std::pair<GlobalVariable *, GlobalVariable *> getIndirectTargets3(Function &F, ConstantInt *AddKey) {
-    std::string GVNameAdd(F.getName().str() + "_IndirectBrTargets3");
-    std::string GVNameXor(F.getName().str() + "_IndirectBr3_Xor");
-    GlobalVariable *GVAdd = F.getParent()->getNamedGlobal(GVNameAdd);
-    GlobalVariable *GVXor = F.getParent()->getNamedGlobal(GVNameXor);
-
-    if (GVAdd && GVXor)
-      return std::make_pair(GVAdd, GVXor);
-
-    auto& Ctx = F.getContext();
-    IntegerType *intType = Type::getInt32Ty(Ctx);
-    if (pointerSize == 8) {
-      intType = Type::getInt64Ty(Ctx);
+        std::string GVNameBBPage(M.getName().str() + "_IndirectBBPage_" + std::to_string(i));
+        auto IATy = ArrayType::get(Int32Ty, ConstantBBIndex.size());
+        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantBBIndex));
+        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
+          IA, GVNameBBPage);
+        BBPage.push_back(GV);
+      }
     }
 
-    // encrypt branch targets
-    std::vector<Constant *> Elements;
-    std::vector<Constant *> XorKeys;
-    for (auto BB:BBTargets) {
-      uint64_t V = RandomEngine.get_uint64_t();
-      Constant *XorKey = ConstantInt::get(intType, V, false);
-      Constant *CE = ConstantExpr::getBitCast(BlockAddress::get(BB), PointerType::getUnqual(F.getContext()));
-      CE = ConstantExpr::getGetElementPtr(Type::getInt8Ty(F.getContext()), CE, ConstantExpr::getXor(AddKey, ConstantExpr::getMul(XorKey, ConstantInt::get(intType, BBNumbering[BB], false))));
-
-      XorKey = ConstantExpr::getNeg(XorKey);
-      XorKey = ConstantExpr::getXor(XorKey, AddKey);
-      XorKey = ConstantExpr::getNeg(XorKey);
-      XorKeys.push_back(XorKey);
-      Elements.push_back(CE);
-    }
-
-    ArrayType *ATy =
-      ArrayType::get(PointerType::getUnqual(F.getContext()), Elements.size());
-    Constant *CA = ConstantArray::get(ATy, ArrayRef<Constant *>(Elements));
-    GVAdd = new GlobalVariable(*F.getParent(), ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-      CA, GVNameAdd);
-    appendToCompilerUsed(*F.getParent(), {GVAdd});
-
-    ArrayType *XTy = ArrayType::get(intType, XorKeys.size());
-    Constant *CX = ConstantArray::get(XTy, XorKeys);
-    GVXor = new GlobalVariable(*F.getParent(), XTy, false, GlobalValue::LinkageTypes::PrivateLinkage, CX, GVNameXor);
-    appendToCompilerUsed(*F.getParent(), {GVXor});
-
-    return std::make_pair(GVAdd, GVXor);
+    return false;
   }
 
 
   bool runOnFunction(Function &Fn) override {
-
     const auto opt = ArgsOptions->toObfuscate(ArgsOptions->indBrOpt(), &Fn);
-
     if (!opt.isEnabled()) {
       return false;
     }
 
-    if (Fn.empty() || Fn.hasLinkOnceLinkage() || Fn.getSection() == ".text.startup") {
-      return false;
-    }
-
     LLVMContext &Ctx = Fn.getContext();
+    auto& M = *Fn.getParent();
 
-    // Init member fields
-    BBNumbering.clear();
-    BBTargets.clear();
-
-    // llvm cannot split critical edge from IndirectBrInst
-    SplitAllCriticalEdges(Fn, CriticalEdgeSplittingOptions(nullptr, nullptr));
-    NumberBasicBlock(Fn);
-
-    if (BBNumbering.empty()) {
+    if (BBTargets.empty()) {
       return false;
     }
 
-    uint64_t V = RandomEngine.get_uint64_t();
-    uint64_t XV = RandomEngine.get_uint64_t();
-    IntegerType* intType = Type::getInt32Ty(Ctx);
-    if (pointerSize == 8) {
-      intType = Type::getInt64Ty(Ctx);
+
+    auto& FuncBBs = FunctionBBs[&Fn];
+    auto& FuncBrs = FunctionBrs[&Fn];
+    if (FuncBBs.empty() || FuncBrs.empty()) {
+      return false;
     }
-    ConstantInt *EncKey = ConstantInt::get(intType, V, false);
-    ConstantInt *EncKey1 = ConstantInt::get(intType, -V, false);
-    ConstantInt *Zero = ConstantInt::get(intType, 0);
 
-    GlobalVariable *GXorKey = nullptr;
-    GlobalVariable *DestBBs = nullptr;
-    GlobalVariable *XorKeys = nullptr;
+    auto Int32Ty = IntegerType::getInt32Ty(Ctx);
+    auto Zero = ConstantInt::getNullValue(Int32Ty);
+    ConstantInt *FuncKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
 
-    if (opt.level() == 0) {
-      DestBBs = getIndirectTargets0(Fn, EncKey1);
-    } else if (opt.level() == 1 || opt.level() == 2) {
-      ConstantInt *CXK = ConstantInt::get(intType, XV, false);
-      GXorKey = new GlobalVariable(*Fn.getParent(), CXK->getType(), false, GlobalValue::LinkageTypes::PrivateLinkage,
-        CXK, Fn.getName() + "_IBrXorKey");
-      appendToCompilerUsed(*Fn.getParent(), {GXorKey});
-      if (opt.level() == 1) {
-        DestBBs = getIndirectTargets1(Fn, EncKey1, CXK);
-      } else {
-        DestBBs = getIndirectTargets2(Fn, EncKey1, CXK);
+    std::vector<GlobalVariable *> FuncBBPage;
+    std::map<BasicBlock *, unsigned> FuncBBIndex;
+    for (unsigned i = 0; i < opt.level(); ++i) {
+      auto seed = RandomEngine.get_uint64_t();
+      auto e = std::default_random_engine(seed);
+      std::shuffle(FuncBBs.begin(), FuncBBs.end(), e);
+
+      std::vector<Constant *> ConstantBBIndex;
+      for (unsigned j = 0; j < FuncBBs.size(); ++j) {
+        auto BB = FuncBBs[j];
+
+        APInt preIndex(32, FuncBBIndex.find(BB) == FuncBBIndex.end() ?
+                             BBIndex[BB] :
+                             FuncBBIndex[BB]);
+
+        preIndex = preIndex.rotr(j);
+        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
+        toWriteData = ConstantExpr::getXor(toWriteData, FuncKey);
+        if (opt.level() > 1) {
+          toWriteData = ConstantExpr::getSub(toWriteData, ConstantInt::get(Int32Ty, j));
+        }
+        if (opt.level() > 2) {
+          toWriteData = ConstantExpr::getNeg(toWriteData);
+        }
+        ConstantBBIndex.push_back(toWriteData);
+        FuncBBIndex[BB] = j;
       }
-    } else {
-      auto [fst, snd] = getIndirectTargets3(Fn, EncKey1);
-      DestBBs = fst;
-      XorKeys = snd;
+
+      {
+        std::string GVNameBBPage(M.getName().str() + "_" + Fn.getName().str() + "_IndirectBBPage_" + std::to_string(i));
+        auto IATy = ArrayType::get(Int32Ty, ConstantBBIndex.size());
+        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantBBIndex));
+        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::InternalLinkage,
+          IA, GVNameBBPage);
+        FuncBBPage.push_back(GV);
+      }
     }
 
-    for (auto &BB : Fn) {
-      auto *BI = dyn_cast<BranchInst>(BB.getTerminator());
+    for (auto &BI : FuncBrs) {
       if (BI && BI->isConditional()) {
         IRBuilder<> IRB(BI);
 
-        Value *Cond = BI->getCondition();
-        Value *Idx;
-        Value *TIdx, *FIdx;
+        auto Cond = BI->getCondition();
+        auto TBB = BI->getSuccessor(0);
+        auto FBB = BI->getSuccessor(1);
 
-        TIdx = ConstantInt::get(intType, BBNumbering[BI->getSuccessor(0)]);
-        FIdx = ConstantInt::get(intType, BBNumbering[BI->getSuccessor(1)]);
-        Idx = IRB.CreateSelect(Cond, TIdx, FIdx);
+        auto TIndex = FuncBBIndex.find(TBB) == FuncBBIndex.end() ?
+          ConstantInt::get(Int32Ty, BBIndex[TBB]) :
+          ConstantInt::get(Int32Ty, FuncBBIndex[TBB]) ;
 
-        Value *GEP = IRB.CreateGEP(
-          DestBBs->getValueType(), DestBBs,
-            {Zero, Idx});
-        Value *EncDestAddr = IRB.CreateLoad(
-            GEP->getType(),
-            GEP,
-            "EncDestAddr");
-        // -EncKey = X - FuncSecret
-        Value *DecKey = EncKey;
+        auto FIndex = FuncBBIndex.find(FBB) == FuncBBIndex.end() ?
+          ConstantInt::get(Int32Ty, BBIndex[FBB]) :
+          ConstantInt::get(Int32Ty, FuncBBIndex[FBB]) ;
 
-        if (GXorKey) {
-          LoadInst *XorKey = IRB.CreateLoad(GXorKey->getValueType(), GXorKey);
-
-          if (opt.level() == 1) {
-            DecKey = IRB.CreateXor(EncKey1, XorKey);
-            DecKey = IRB.CreateNeg(DecKey);
-          } else if (opt.level() == 2) {
-            DecKey = IRB.CreateXor(EncKey1, IRB.CreateMul(XorKey, Idx));
-            DecKey = IRB.CreateNeg(DecKey);
+        auto NextIndex = IRB.CreateSelect(Cond, TIndex, FIndex);
+        for (int j = FuncBBPage.size() - 1; j >= 0; --j) {
+          auto TargetPage = FuncBBPage[j];
+          auto OriginIndex = NextIndex;
+          Value *GEP = IRB.CreateGEP(
+            TargetPage->getValueType(), TargetPage,
+            {Zero, NextIndex});
+          NextIndex = IRB.CreateLoad(Int32Ty, GEP);
+          if (opt.level() > 2) {
+            NextIndex = IRB.CreateNeg(NextIndex);
           }
+          if (opt.level() > 1) {
+            NextIndex = IRB.CreateAdd(NextIndex, OriginIndex);
+          }
+          NextIndex = IRB.CreateXor(NextIndex, FuncKey);
+          NextIndex = IRB.CreateCall(
+            Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshl, {NextIndex->getType()}),
+            {NextIndex, NextIndex, OriginIndex});
         }
 
-        if (XorKeys) {
-          Value *XorKeysGEP = IRB.CreateGEP(XorKeys->getValueType(), XorKeys, {Zero, Idx});
+        for (int j = BBPage.size() - 1; j >= 0; --j) {
+          auto TargetPage = BBPage[j];
+          auto OriginIndex = NextIndex;
+          Value *GEP = IRB.CreateGEP(
+            TargetPage->getValueType(), TargetPage,
+            {Zero, NextIndex});
+          if (j) {
+            NextIndex = IRB.CreateLoad(Int32Ty, GEP);
+            NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
+            NextIndex = IRB.CreateXor(NextIndex, ModuleKey);
+            NextIndex = IRB.CreateCall(
+              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshr, {NextIndex->getType()}),
+              {NextIndex, NextIndex, OriginIndex});
+            continue;
+          }
 
-          Value *XorKey = IRB.CreateLoad(intType, XorKeysGEP);
-
-          XorKey = IRB.CreateNeg(XorKey);
-          XorKey = IRB.CreateXor(XorKey, EncKey1);
-          XorKey = IRB.CreateNeg(XorKey);
-
-          DecKey = IRB.CreateXor(EncKey1, IRB.CreateMul(XorKey, Idx));
-          DecKey = IRB.CreateNeg(DecKey);
+          Value *BBPtr = IRB.CreateLoad(
+              PointerType::getUnqual(Ctx), GEP);
+          IndirectBrInst *IBI = IndirectBrInst::Create(BBPtr, 2);
+          IBI->addDestination(BI->getSuccessor(0));
+          IBI->addDestination(BI->getSuccessor(1));
+          ReplaceInstWithInst(BI, IBI);
         }
-
-        Value *DestAddr = IRB.CreateGEP(
-          Type::getInt8Ty(Ctx),
-            EncDestAddr, DecKey);
-
-        IndirectBrInst *IBI = IndirectBrInst::Create(DestAddr, 2);
-        IBI->addDestination(BI->getSuccessor(0));
-        IBI->addDestination(BI->getSuccessor(1));
-        ReplaceInstWithInst(BI, IBI);
+        RunOnFuncChanged = true;
       }
     }
 
+    return true;
+  }
+
+  bool doFinalization(Module &M) override {
+    if (!RunOnFuncChanged || BBPage.empty()) {
+      return false;
+    }
+    for (auto bbPage : BBPage) {
+      appendToCompilerUsed(M, {bbPage});
+    }
     return true;
   }
 
