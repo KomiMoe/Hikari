@@ -40,6 +40,7 @@ struct IndirectGlobalVariable : public FunctionPass {
       if (F.isIntrinsic()) {
         continue;
       }
+      LowerConstantExpr(F);
       for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
         Instruction *Inst  = &*I;
 
@@ -76,12 +77,6 @@ struct IndirectGlobalVariable : public FunctionPass {
     auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
     ModuleKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
 
-    for (auto &Fn : M) {
-      if (Fn.isIntrinsic()) {
-        continue;
-      }
-      LowerConstantExpr(Fn);
-    }
     NumberGlobalVariable(M);
     if (GlobalVariables.empty()) {
       return false;
