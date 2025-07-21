@@ -19,9 +19,13 @@ struct IndirectGlobalVariable : public FunctionPass {
   static char ID;
   
   ObfuscationOptions *ArgsOptions;
-  std::map<GlobalVariable *, unsigned> GVNumbering;
+  std::map<GlobalVariable *, unsigned> GVIndex;
+  std::vector<GlobalVariable *> GVPage;
+  std::map<Function *, std::vector<GlobalVariable *>> FunctionGVs;
   std::vector<GlobalVariable *> GlobalVariables;
   CryptoUtils RandomEngine;
+  Constant *ModuleKey = nullptr;
+  bool RunOnFuncChanged = false;
 
   IndirectGlobalVariable(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
     this->pointerSize = pointerSize;
@@ -30,148 +34,108 @@ struct IndirectGlobalVariable : public FunctionPass {
 
   StringRef getPassName() const override { return {"IndirectGlobalVariable"}; }
 
-  void NumberGlobalVariable(Function &F) {
-    for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
-      for (User::op_iterator op = (*I).op_begin(); op != (*I).op_end(); ++op) {
-        Value *val = *op;
-        if (GlobalVariable *GV = dyn_cast<GlobalVariable>(val)) {
-          if (!GV->isThreadLocal() && GVNumbering.count(GV) == 0 &&
-              !GV->isDLLImportDependent()) {
-            GVNumbering[GV] = 0;
-            GlobalVariables.push_back((GlobalVariable *) val);
+  void NumberGlobalVariable(Module &M) {
+    for (auto &F : M) {
+      if (F.isIntrinsic()) {
+        continue;
+      }
+      for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
+        Instruction *Inst  = &*I;
+
+        if (Inst->isEHPad() || isa<CallInst>(Inst)) {
+          continue;
+        }
+
+        for (auto op = Inst->op_begin(); op != Inst->op_end(); ++op) {
+          Value *val = *op;
+          if (auto GV = dyn_cast<GlobalVariable>(val)) {
+            if (GV->isThreadLocal() || GV->isDLLImportDependent()) {
+              continue;
+            }
+            if (std::find(FunctionGVs[&F].begin(), FunctionGVs[&F].end(), GV)
+                == FunctionGVs[&F].end()) {
+              FunctionGVs[&F].push_back(GV);
+            }
+
+            if (GVIndex.count(GV) == 0) {
+              GVIndex[GV] = 0;
+              GlobalVariables.push_back(GV);
+            }
           }
         }
       }
     }
+  }
 
-    long seed = RandomEngine.get_uint32_t();
+  bool doInitialization(Module &M) override {
+    GVIndex.clear();
+    GVPage.clear();
+    FunctionGVs.clear();
+    GlobalVariables.clear();
+    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
+    ModuleKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
+
+    for (auto &Fn : M) {
+      if (Fn.isIntrinsic()) {
+        continue;
+      }
+      LowerConstantExpr(Fn);
+    }
+    NumberGlobalVariable(M);
+    if (GlobalVariables.empty()) {
+      return false;
+    }
+    auto seed = RandomEngine.get_uint64_t();
     std::default_random_engine e(seed);
     std::shuffle(GlobalVariables.begin(), GlobalVariables.end(), e);
-    unsigned N = 0;
-    for (auto GV:GlobalVariables) {
-      GVNumbering[GV] = N++;
+
+    std::vector<Constant *> GVGVs;
+    for (unsigned i = 0; i < GlobalVariables.size(); ++i) {
+      auto GV = GlobalVariables[i];
+      GVGVs.push_back(ConstantExpr::getBitCast(GV, PointerType::getUnqual(M.getContext())));
+      GVIndex[GV] = i;
     }
+
+    {
+      std::string GVNameGVs(M.getName().str() + "_IndirectGVs");
+      ArrayType *ATy = ArrayType::get(GVGVs[0]->getType(), GVGVs.size());
+      Constant *CA = ConstantArray::get(ATy, ArrayRef(GVGVs));
+      auto GV = new GlobalVariable(M, ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        CA, GVNameGVs);
+      GVPage.push_back(GV);
+    }
+
+    for (unsigned i = 0; i < 1; ++i) {
+      seed = RandomEngine.get_uint64_t();
+      e = std::default_random_engine(seed);
+      std::shuffle(GlobalVariables.begin(), GlobalVariables.end(), e);
+
+      std::vector<Constant *> ConstantGVIndex;
+      for (unsigned j = 0; j < GlobalVariables.size(); ++j) {
+        auto GV = GlobalVariables[j];
+        auto preIndex = GVIndex[GV];
+        auto count = j % 32;
+        preIndex = preIndex << count | preIndex >> (32 - count);
+        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
+        toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
+        toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
+        ConstantGVIndex.push_back(toWriteData);
+        GVIndex[GV] = j;
+      }
+
+      {
+
+        std::string GVNameGVPage(M.getName().str() + "_IndirectGVPage_" + std::to_string(i));
+        auto IATy = ArrayType::get(Int32Ty, ConstantGVIndex.size());
+        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantGVIndex));
+        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
+          IA, GVNameGVPage);
+        GVPage.push_back(GV);
+      }
+    }
+    return false;
   }
 
-  GlobalVariable *getIndirectGlobalVariables0(Function &F, ConstantInt *EncKey) const {
-    std::string GVName(F.getName().str() + "_IndirectGVars");
-    GlobalVariable *GV = F.getParent()->getNamedGlobal(GVName);
-    if (GV)
-      return GV;
-
-    std::vector<Constant *> Elements;
-    for (auto GVar:GlobalVariables) {
-      Constant *CE = ConstantExpr::getBitCast(
-          GVar, PointerType::getUnqual(F.getContext()));
-      CE = ConstantExpr::getGetElementPtr(Type::getInt8Ty(F.getContext()), CE, EncKey);
-      Elements.push_back(CE);
-    }
-
-    ArrayType *ATy =
-        ArrayType::get(PointerType::getUnqual(F.getContext()), Elements.size());
-    Constant *CA = ConstantArray::get(ATy, ArrayRef<Constant *>(Elements));
-    GV = new GlobalVariable(*F.getParent(), ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-                            CA, GVName);
-    appendToCompilerUsed(*F.getParent(), {GV});
-    return GV;
-  }
-
-  GlobalVariable *getIndirectGlobalVariables1(Function &F, ConstantInt *AddKey, ConstantInt *XorKey) const {
-    std::string GVName(F.getName().str() + "_IndirectGVars1");
-    GlobalVariable *GV = F.getParent()->getNamedGlobal(GVName);
-    if (GV)
-      return GV;
-
-    std::vector<Constant *> Elements;
-    for (auto GVar:GlobalVariables) {
-      Constant *CE = ConstantExpr::getBitCast(
-        GVar, PointerType::getUnqual(F.getContext()));
-      CE = ConstantExpr::getGetElementPtr(Type::getInt8Ty(F.getContext()), CE, ConstantExpr::getXor(AddKey, XorKey));
-      Elements.push_back(CE);
-    }
-
-    ArrayType *ATy =
-      ArrayType::get(PointerType::getUnqual(F.getContext()), Elements.size());
-    Constant *CA = ConstantArray::get(ATy, ArrayRef<Constant *>(Elements));
-    GV = new GlobalVariable(*F.getParent(), ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-      CA, GVName);
-    appendToCompilerUsed(*F.getParent(), {GV});
-    return GV;
-  }
-
-  GlobalVariable *getIndirectGlobalVariables2(Function &F, ConstantInt *AddKey, ConstantInt *XorKey) {
-    std::string GVName(F.getName().str() + "_IndirectGVars2");
-    GlobalVariable *GV = F.getParent()->getNamedGlobal(GVName);
-    if (GV)
-      return GV;
-
-    auto& Ctx = F.getContext();
-    IntegerType *intType = Type::getInt32Ty(Ctx);
-    if (pointerSize == 8) {
-      intType = Type::getInt64Ty(Ctx);
-    }
-
-    std::vector<Constant *> Elements;
-    for (auto GVar:GlobalVariables) {
-      Constant *CE = ConstantExpr::getBitCast(
-        GVar, PointerType::getUnqual(F.getContext()));
-      CE = ConstantExpr::getGetElementPtr(Type::getInt8Ty(F.getContext()), CE, ConstantExpr::getXor(AddKey, ConstantExpr::getMul(XorKey, ConstantInt::get(intType, GVNumbering[GVar], false))));
-      Elements.push_back(CE);
-    }
-
-    ArrayType *ATy =
-      ArrayType::get(PointerType::getUnqual(F.getContext()), Elements.size());
-    Constant *CA = ConstantArray::get(ATy, ArrayRef<Constant *>(Elements));
-    GV = new GlobalVariable(*F.getParent(), ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-      CA, GVName);
-    appendToCompilerUsed(*F.getParent(), {GV});
-    return GV;
-  }
-
-  std::pair<GlobalVariable *, GlobalVariable *> getIndirectGlobalVariables3(Function &F, ConstantInt *AddKey) {
-    std::string GVNameAdd(F.getName().str() + "_IndirectGVars3");
-    std::string GVNameXor(F.getName().str() + "_IndirectGVars3Xor");
-    GlobalVariable *GVAdd = F.getParent()->getNamedGlobal(GVNameAdd);
-    GlobalVariable *GVXor = F.getParent()->getNamedGlobal(GVNameXor);
-    if (GVAdd && GVXor)
-      return std::make_pair(GVAdd, GVXor);
-
-    auto& Ctx = F.getContext();
-    IntegerType *intType = Type::getInt32Ty(Ctx);
-    if (pointerSize == 8) {
-      intType = Type::getInt64Ty(Ctx);
-    }
-
-    std::vector<Constant *> Elements;
-    std::vector<Constant *> XorKeys;
-    for (auto GVar:GlobalVariables) {
-      uint64_t V = RandomEngine.get_uint64_t();
-      Constant *XorKey = ConstantInt::get(intType, V, false);
-
-      Constant *CE = ConstantExpr::getBitCast(
-        GVar, PointerType::getUnqual(F.getContext()));
-      CE = ConstantExpr::getGetElementPtr(Type::getInt8Ty(F.getContext()), CE, ConstantExpr::getXor(AddKey, ConstantExpr::getMul(XorKey, ConstantInt::get(intType, GVNumbering[GVar], false))));
-      Elements.push_back(CE);
-
-      XorKey = ConstantExpr::getNeg(XorKey);
-      XorKey = ConstantExpr::getXor(XorKey, AddKey);
-      XorKey = ConstantExpr::getNeg(XorKey);
-      XorKeys.push_back(XorKey);
-    }
-
-    ArrayType *ATy =
-      ArrayType::get(PointerType::getUnqual(F.getContext()), Elements.size());
-    Constant *CA = ConstantArray::get(ATy, ArrayRef<Constant *>(Elements));
-    GVAdd = new GlobalVariable(*F.getParent(), ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-      CA, GVNameAdd);
-    appendToCompilerUsed(*F.getParent(), {GVAdd});
-
-    ArrayType *XTy = ArrayType::get(intType, XorKeys.size());
-    Constant *CX = ConstantArray::get(XTy, XorKeys);
-    GVXor = new GlobalVariable(*F.getParent(), XTy, false, GlobalValue::LinkageTypes::PrivateLinkage, CX, GVNameXor);
-    appendToCompilerUsed(*F.getParent(), {GVXor});
-    return std::make_pair(GVAdd, GVXor);
-  }
 
   bool runOnFunction(Function &Fn) override {
     const auto opt = ArgsOptions->toObfuscate(ArgsOptions->indGvOpt(), &Fn);
@@ -180,171 +144,137 @@ struct IndirectGlobalVariable : public FunctionPass {
     }
 
     LLVMContext &Ctx = Fn.getContext();
+    auto& M = *Fn.getParent();
 
-    GVNumbering.clear();
-    GlobalVariables.clear();
-
-    LowerConstantExpr(Fn);
-    NumberGlobalVariable(Fn);
 
     if (GlobalVariables.empty()) {
       return false;
     }
 
-    uint64_t V = RandomEngine.get_uint64_t();
-    uint64_t XV = RandomEngine.get_uint64_t();
-    IntegerType* intType = Type::getInt32Ty(Ctx);
-    if (pointerSize == 8) {
-      intType = Type::getInt64Ty(Ctx);
+    auto& FuncGVs = FunctionGVs[&Fn];
+    if (FunctionGVs.empty()) {
+      return false;
     }
 
-    ConstantInt *EncKey = ConstantInt::get(intType, V, false);
-    ConstantInt *EncKey1 = ConstantInt::get(intType, -V, false);
-    ConstantInt *Zero = ConstantInt::get(intType, 0);
+    auto Int32Ty = IntegerType::getInt32Ty(Ctx);
+    auto Zero = ConstantInt::getNullValue(Int32Ty);
+    ConstantInt *FuncKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
 
-    GlobalVariable *GXorKey = nullptr;
-    GlobalVariable *GVars = nullptr;
-    GlobalVariable *XorKeys = nullptr;
+    std::vector<GlobalVariable *> FuncGVPage;
+    std::map<GlobalVariable *, unsigned> FuncGVIndex;
+    for (unsigned i = 0; i < opt.level(); ++i) {
+      auto seed = RandomEngine.get_uint64_t();
+      auto e = std::default_random_engine(seed);
+      std::shuffle(FuncGVs.begin(), FuncGVs.end(), e);
 
-    if (opt.level() == 0) {
-      GVars = getIndirectGlobalVariables0(Fn, EncKey1);
-    } else if (opt.level() == 1 || opt.level() == 2) {
-      ConstantInt *CXK = ConstantInt::get(intType, XV, false);
-      GXorKey = new GlobalVariable(*Fn.getParent(), CXK->getType(), false, GlobalValue::LinkageTypes::PrivateLinkage,
-        CXK, Fn.getName() + "_IGVXorKey");
-      appendToCompilerUsed(*Fn.getParent(), {GXorKey});
-      if (opt.level() == 1) {
-        GVars = getIndirectGlobalVariables1(Fn, EncKey1, CXK);
-      } else {
-        GVars = getIndirectGlobalVariables2(Fn, EncKey1, CXK);
+      std::vector<Constant *> ConstantGVIndex;
+      for (unsigned j = 0; j < FuncGVs.size(); ++j) {
+        auto GV = FuncGVs[j];
+        auto preIndex = FuncGVIndex.find(GV) == FuncGVIndex.end() ?
+                          GVIndex[GV] :
+                          FuncGVIndex[GV];
+
+        auto count = j % 32;
+        preIndex = preIndex >> count | preIndex << (32 - count);
+        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
+        toWriteData = ConstantExpr::getXor(toWriteData, FuncKey);
+        if (opt.level() > 1) {
+          toWriteData = ConstantExpr::getSub(toWriteData, ConstantInt::get(Int32Ty, j));
+        }
+        if (opt.level() > 2) {
+          toWriteData = ConstantExpr::getNeg(toWriteData);
+        }
+        ConstantGVIndex.push_back(toWriteData);
+        FuncGVIndex[GV] = j;
       }
-    } else {
-      auto [fst, snd] = getIndirectGlobalVariables3(Fn, EncKey1);
-      GVars = fst;
-      XorKeys = snd;
+
+      {
+        std::string GVNameGVPage(M.getName().str() + "_" + Fn.getName().str() + "_IndirectGVPage_" + std::to_string(i));
+        auto IATy = ArrayType::get(Int32Ty, ConstantGVIndex.size());
+        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantGVIndex));
+        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::InternalLinkage,
+          IA, GVNameGVPage);
+        FuncGVPage.push_back(GV);
+      }
     }
+
 
     for (inst_iterator I = inst_begin(Fn), E = inst_end(Fn); I != E; ++I) {
       Instruction *Inst = &*I;
-      if (isa<LandingPadInst>(Inst) || isa<CleanupPadInst>(Inst) ||
-          isa<CatchPadInst>(Inst) || isa<CatchReturnInst>(Inst) ||
-          isa<CatchSwitchInst>(Inst) || isa<ResumeInst>(Inst) || 
-          isa<CallInst>(Inst)) {
+      if (isa<CallInst>(Inst) || isa<CatchReturnInst>(Inst) || isa<ResumeInst>(Inst) || Inst->isEHPad()) {
         continue;
       }
-      if (PHINode *PHI = dyn_cast<PHINode>(Inst)) {
-        for (unsigned int i = 0; i < PHI->getNumIncomingValues(); ++i) {
-          Value *val = PHI->getIncomingValue(i);
-          if (GlobalVariable *GV = dyn_cast<GlobalVariable>(val)) {
-            if (GVNumbering.count(GV) == 0) {
+
+      for (unsigned i = 0; i < Inst->getNumOperands(); ++i) {
+        if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Inst->getOperand(i))) {
+          if (!GVIndex.count(GV)) {
+            continue;
+          }
+
+          PHINode *PHI = dyn_cast<PHINode>(Inst);
+          IRBuilder<> IRB(PHI ? PHI->getIncomingBlock(i)->getTerminator() : Inst);
+
+          Value *NextIndex = FuncGVIndex.find(GV) == FuncGVIndex.end() ?
+            ConstantInt::get(Int32Ty, GVIndex[GV]) :
+            ConstantInt::get(Int32Ty, FuncGVIndex[GV]) ;
+
+          for (int j = FuncGVPage.size() - 1; j >= 0; --j) {
+            auto TargetPage = FuncGVPage[j];
+            auto OriginIndex = NextIndex;
+            Value *GEP = IRB.CreateGEP(
+              TargetPage->getValueType(), TargetPage,
+              {Zero, NextIndex});
+            NextIndex = IRB.CreateLoad(Int32Ty, GEP);
+            if (opt.level() > 2) {
+              NextIndex = IRB.CreateNeg(NextIndex);
+            }
+            if (opt.level() > 1) {
+              NextIndex = IRB.CreateAdd(NextIndex, OriginIndex);
+            }
+            NextIndex = IRB.CreateXor(NextIndex, FuncKey);
+            NextIndex = IRB.CreateCall(
+              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshl, {NextIndex->getType()}),
+              {NextIndex, NextIndex, OriginIndex});
+          }
+
+          for (int j = GVPage.size() - 1; j >= 0; --j) {
+            auto TargetPage = GVPage[j];
+            auto OriginIndex = NextIndex;
+            Value *GEP = IRB.CreateGEP(
+              TargetPage->getValueType(), TargetPage,
+              {Zero, NextIndex});
+            if (j) {
+              NextIndex = IRB.CreateLoad(Int32Ty, GEP);
+              NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
+              NextIndex = IRB.CreateXor(NextIndex, ModuleKey);
+              NextIndex = IRB.CreateCall(
+                Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshr, {NextIndex->getType()}),
+                {NextIndex, NextIndex, OriginIndex});
               continue;
             }
 
-            Instruction *IP = PHI->getIncomingBlock(i)->getTerminator();
-            IRBuilder<> IRB(IP);
-
-            Value *Idx = ConstantInt::get(intType, GVNumbering[GV]);
-            Value *GEP = IRB.CreateGEP(
-                GVars->getValueType(),
-                GVars,
-                {Zero, Idx});
-            LoadInst *EncGVAddr = IRB.CreateLoad(
-                GEP->getType(), GEP,
-                GV->getName());
-
-            Value *DecKey = EncKey;
-            if (GXorKey) {
-              LoadInst *XorKey = IRB.CreateLoad(GXorKey->getValueType(), GXorKey);
-
-              if (opt.level() == 1) {
-                DecKey = IRB.CreateXor(EncKey1, XorKey);
-                DecKey = IRB.CreateNeg(DecKey);
-              } else if (opt.level() == 2) {
-                DecKey = IRB.CreateXor(EncKey1, IRB.CreateMul(XorKey, Idx));
-                DecKey = IRB.CreateNeg(DecKey);
-              }
-            }
-
-            if (XorKeys) {
-              Value *XorKeysGEP = IRB.CreateGEP(XorKeys->getValueType(), XorKeys, {Zero, Idx});
-
-              Value *XorKey = IRB.CreateLoad(intType, XorKeysGEP);
-
-              XorKey = IRB.CreateNeg(XorKey);
-              XorKey = IRB.CreateXor(XorKey, EncKey1);
-              XorKey = IRB.CreateNeg(XorKey);
-
-              DecKey = IRB.CreateXor(EncKey1, IRB.CreateMul(XorKey, Idx));
-              DecKey = IRB.CreateNeg(DecKey);
-            }
-
-            Value *GVAddr = IRB.CreateGEP(
-              Type::getInt8Ty(Ctx),
-                EncGVAddr,
-              DecKey);
-            GVAddr = IRB.CreateBitCast(GVAddr, GV->getType());
-            GVAddr->setName("IndGV0_");
-            PHI->setIncomingValue(i, GVAddr);
+            Value *GVPtr = IRB.CreateLoad(
+              PointerType::getUnqual(Ctx), GEP,
+              GV->getName());
+            GVPtr = IRB.CreateBitCast(GVPtr, GV->getType());
+            Inst->replaceUsesOfWith(GV, GVPtr);
           }
-        }
-      } else {
-        for (User::op_iterator op = Inst->op_begin(); op != Inst->op_end(); ++op) {
-          if (GlobalVariable *GV = dyn_cast<GlobalVariable>(*op)) {
-            if (GVNumbering.count(GV) == 0) {
-              continue;
-            }
-
-            IRBuilder<> IRB(Inst);
-            Value *Idx = ConstantInt::get(intType, GVNumbering[GV]);
-            Value *GEP = IRB.CreateGEP(
-                GVars->getValueType(),
-                GVars,
-                {Zero, Idx});
-            LoadInst *EncGVAddr = IRB.CreateLoad(
-                GEP->getType(),
-                GEP,
-                GV->getName());
-
-            Value *DecKey = EncKey;
-            if (GXorKey) {
-              LoadInst *XorKey = IRB.CreateLoad(GXorKey->getValueType(), GXorKey);
-
-              if (opt.level() == 1) {
-                DecKey = IRB.CreateXor(EncKey1, XorKey);
-                DecKey = IRB.CreateNeg(DecKey);
-              } else if (opt.level() == 2) {
-                DecKey = IRB.CreateXor(EncKey1, IRB.CreateMul(XorKey, Idx));
-                DecKey = IRB.CreateNeg(DecKey);
-              }
-            }
-
-            if (XorKeys) {
-              Value *XorKeysGEP = IRB.CreateGEP(XorKeys->getValueType(), XorKeys, {Zero, Idx});
-
-              Value *XorKey = IRB.CreateLoad(intType, XorKeysGEP);
-
-              XorKey = IRB.CreateNeg(XorKey);
-              XorKey = IRB.CreateXor(XorKey, EncKey1);
-              XorKey = IRB.CreateNeg(XorKey);
-
-              DecKey = IRB.CreateXor(EncKey1, IRB.CreateMul(XorKey, Idx));
-              DecKey = IRB.CreateNeg(DecKey);
-            }
-
-            Value *GVAddr = IRB.CreateGEP(
-              Type::getInt8Ty(Ctx),
-                EncGVAddr,
-                DecKey);
-            GVAddr = IRB.CreateBitCast(GVAddr, GV->getType());
-            GVAddr->setName("IndGV1_");
-            Inst->replaceUsesOfWith(GV, GVAddr);
-          }
+          RunOnFuncChanged = true;
         }
       }
     }
 
-      return true;
+    return true;
+  }
+  bool doFinalization(Module &M) override {
+    if (!RunOnFuncChanged || GVPage.empty()) {
+      return false;
     }
+    for (auto gvPage : GVPage) {
+      appendToCompilerUsed(M, {gvPage});
+    }
+    return true;
+  }
 
   };
 } // namespace llvm
