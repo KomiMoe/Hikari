@@ -155,7 +155,6 @@ struct IndirectCall : public FunctionPass {
       return false;
     }
 
-    // TODO 生成出来太大了
     auto Int32Ty = IntegerType::getInt32Ty(Ctx);
     auto Zero = ConstantInt::getNullValue(Int32Ty);
     ConstantInt *FuncKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
