@@ -104,7 +104,7 @@ struct IndirectCall : public FunctionPass {
       CalleePage.push_back(GV);
     }
 
-    for (unsigned i = 0; i < 2; ++i) {
+    for (unsigned i = 0; i < 1; ++i) {
       seed = RandomEngine.get_uint64_t();
       e = std::default_random_engine(seed);
       std::shuffle(Callees.begin(), Callees.end(), e);
@@ -191,9 +191,8 @@ struct IndirectCall : public FunctionPass {
         std::string GVNameCalleePage(M.getName().str() + "_" + Fn.getName().str() + "_IndirectCalleePage_" + std::to_string(i));
         auto IATy = ArrayType::get(Int32Ty, ConstantCalleeIndex.size());
         auto IA = ConstantArray::get(IATy, ArrayRef(ConstantCalleeIndex));
-        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
+        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::InternalLinkage,
           IA, GVNameCalleePage);
-        appendToCompilerUsed(M, {GV});
         FuncCalleePage.push_back(GV);
       }
     }
