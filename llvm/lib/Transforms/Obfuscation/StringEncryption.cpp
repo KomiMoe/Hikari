@@ -456,8 +456,8 @@ bool StringEncryption::processConstantStringUse(Function *F) {
                 Inst.replaceUsesOfWith(GV, User->DecGV);
                 MaybeDeadGlobalVars.insert(GV);
                 DecryptedGV.insert(GV);
-                Changed = true;
               }
+              Changed = true;
             } else if (Iter1 != CSPEntryMap.end()) { // GV is a constant string
               CSPEntry *Entry = Iter1->second;
               if (DecryptedGV.count(GV) > 0) {
@@ -477,8 +477,8 @@ bool StringEncryption::processConstantStringUse(Function *F) {
                 Inst.replaceUsesOfWith(GV, Entry->DecGV);
                 MaybeDeadGlobalVars.insert(GV);
                 DecryptedGV.insert(GV);
-                Changed = true;
               }
+              Changed = true;
             }
           }
         }
@@ -497,8 +497,8 @@ bool StringEncryption::processConstantStringUse(Function *F) {
                 Inst.replaceUsesOfWith(GV, User->DecGV);
                 MaybeDeadGlobalVars.insert(GV);
                 DecryptedGV.insert(GV);
-                Changed = true;
               }
+              Changed = true;
             } else if (Iter1 != CSPEntryMap.end()) {
               CSPEntry *Entry = Iter1->second;
               if (DecryptedGV.count(GV) > 0) {
@@ -517,8 +517,8 @@ bool StringEncryption::processConstantStringUse(Function *F) {
                 Inst.replaceUsesOfWith(GV, Entry->DecGV);
                 MaybeDeadGlobalVars.insert(GV);
                 DecryptedGV.insert(GV);
-                Changed = true;
               }
+              Changed = true;
             }
           }
         }
