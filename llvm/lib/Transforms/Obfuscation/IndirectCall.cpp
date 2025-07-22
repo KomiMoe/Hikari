@@ -114,7 +114,7 @@ struct IndirectCall : public FunctionPass {
       for (unsigned j = 0; j < Callees.size(); ++j) {
         auto Callee = Callees[j];
         APInt preIndex(32, CalleeIndex[Callee]);
-        preIndex = preIndex.rotl(j);
+        preIndex = preIndex.rotl(j).byteSwap();
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
         toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
         toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
@@ -244,9 +244,13 @@ struct IndirectCall : public FunctionPass {
           NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
           NextIndex = IRB.CreateXor(NextIndex, ModuleKey);
           NextIndex = IRB.CreateCall(
+              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::bswap, {NextIndex->getType()}),
+              {NextIndex});
+
+          NextIndex = IRB.CreateCall(
               Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshr, {NextIndex->getType()}),
               {NextIndex, NextIndex, OriginIndex});
-            continue;
+          continue;
         }
 
         Value *FnPtr = IRB.CreateLoad(

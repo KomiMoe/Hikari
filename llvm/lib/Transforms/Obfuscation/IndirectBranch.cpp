@@ -107,7 +107,7 @@ struct IndirectBranch : public FunctionPass {
       for (unsigned j = 0; j < BBTargets.size(); ++j) {
         auto BB = BBTargets[j];
         APInt preIndex(32, BBIndex[BB]);
-        preIndex = preIndex.rotl(j);
+        preIndex = preIndex.rotl(j).byteSwap();
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
         toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
         toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
@@ -238,6 +238,10 @@ struct IndirectBranch : public FunctionPass {
             NextIndex = IRB.CreateLoad(Int32Ty, GEP);
             NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
             NextIndex = IRB.CreateXor(NextIndex, ModuleKey);
+            NextIndex = IRB.CreateCall(
+              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::bswap, {NextIndex->getType()}),
+              {NextIndex});
+
             NextIndex = IRB.CreateCall(
               Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshr, {NextIndex->getType()}),
               {NextIndex, NextIndex, OriginIndex});
