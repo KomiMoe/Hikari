@@ -26,7 +26,7 @@ struct IndirectCall : public FunctionPass {
   std::map<Function *, std::vector<Function *>> FunctionCallees;
   std::vector<Function *> Callees;
   CryptoUtils RandomEngine;
-  Constant *ModuleKey = nullptr;
+  std::map<Function *, Constant *> CalleeKeys;
   bool RunOnFuncChanged = false;
 
   IndirectCall(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
@@ -37,6 +37,7 @@ struct IndirectCall : public FunctionPass {
   StringRef getPassName() const override { return {"IndirectCall"}; }
 
   void NumberCallees(Module &M) {
+    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
     for (auto &F : M) {
       if (F.isIntrinsic()) {
         continue;
@@ -64,6 +65,7 @@ struct IndirectCall : public FunctionPass {
             if (CalleeIndex.count(Callee) == 0) {
               CalleeIndex[Callee] = {};
               Callees.push_back(Callee);
+              CalleeKeys[Callee] = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
             }
           }
         }
@@ -77,8 +79,8 @@ struct IndirectCall : public FunctionPass {
     FunctionCallees.clear();
     Callees.clear();
     CalleePage.clear();
+    CalleeKeys.clear();
     auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
-    ModuleKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
 
     NumberCallees(M);
     if (!Callees.size()) {
@@ -116,7 +118,7 @@ struct IndirectCall : public FunctionPass {
         APInt preIndex(32, CalleeIndex[Callee]);
         preIndex = preIndex.rotl(j).byteSwap();
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
+        toWriteData = ConstantExpr::getXor(toWriteData, CalleeKeys[Callee]);
         toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
         ConstantCalleeIndex.push_back(toWriteData);
         CalleeIndex[Callee] = j;
@@ -242,7 +244,7 @@ struct IndirectCall : public FunctionPass {
         if (i) {
           NextIndex = IRB.CreateLoad(Int32Ty, GEP);
           NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
-          NextIndex = IRB.CreateXor(NextIndex, ModuleKey);
+          NextIndex = IRB.CreateXor(NextIndex, CalleeKeys[Callee]);
           NextIndex = IRB.CreateCall(
               Intrinsic::getOrInsertDeclaration(&M, Intrinsic::bswap, {NextIndex->getType()}),
               {NextIndex});

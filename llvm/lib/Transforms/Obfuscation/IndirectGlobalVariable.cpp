@@ -25,7 +25,7 @@ struct IndirectGlobalVariable : public FunctionPass {
   std::map<Function *, std::vector<GlobalVariable *>> FunctionGVs;
   std::vector<GlobalVariable *> GlobalVariables;
   CryptoUtils RandomEngine;
-  Constant *ModuleKey = nullptr;
+  std::map<GlobalVariable *, Constant *> GVKeys;
   bool RunOnFuncChanged = false;
 
   IndirectGlobalVariable(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
@@ -36,6 +36,7 @@ struct IndirectGlobalVariable : public FunctionPass {
   StringRef getPassName() const override { return {"IndirectGlobalVariable"}; }
 
   void NumberGlobalVariable(Module &M) {
+    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
     for (auto &F : M) {
       if (F.isIntrinsic()) {
         continue;
@@ -62,6 +63,7 @@ struct IndirectGlobalVariable : public FunctionPass {
             if (GVIndex.count(GV) == 0) {
               GVIndex[GV] = 0;
               GlobalVariables.push_back(GV);
+              GVKeys[GV] = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
             }
           }
         }
@@ -74,8 +76,8 @@ struct IndirectGlobalVariable : public FunctionPass {
     GVPage.clear();
     FunctionGVs.clear();
     GlobalVariables.clear();
+    GVKeys.clear();
     auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
-    ModuleKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
 
     NumberGlobalVariable(M);
     if (GlobalVariables.empty()) {
@@ -112,7 +114,7 @@ struct IndirectGlobalVariable : public FunctionPass {
         APInt preIndex(32, GVIndex[GV]);
         preIndex = preIndex.rotl(j).byteSwap();
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
+        toWriteData = ConstantExpr::getXor(toWriteData, GVKeys[GV]);
         toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
         ConstantGVIndex.push_back(toWriteData);
         GVIndex[GV] = j;
@@ -241,7 +243,7 @@ struct IndirectGlobalVariable : public FunctionPass {
             if (j) {
               NextIndex = IRB.CreateLoad(Int32Ty, GEP);
               NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
-              NextIndex = IRB.CreateXor(NextIndex, ModuleKey);
+              NextIndex = IRB.CreateXor(NextIndex, GVKeys[GV]);
               NextIndex = IRB.CreateCall(
                 Intrinsic::getOrInsertDeclaration(&M, Intrinsic::bswap, {NextIndex->getType()}),
                 {NextIndex});

@@ -26,7 +26,7 @@ struct IndirectBranch : public FunctionPass {
   std::map<Function *, std::vector<BranchInst *>> FunctionBrs;
   std::vector<BasicBlock *> BBTargets;        //all conditional branch targets
   CryptoUtils RandomEngine;
-  Constant *ModuleKey = nullptr;
+  std::map<BasicBlock *, Constant *> BBKeys;
   bool RunOnFuncChanged = false;
 
   IndirectBranch(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
@@ -37,6 +37,7 @@ struct IndirectBranch : public FunctionPass {
   StringRef getPassName() const override { return {"IndirectBranch"}; }
 
   void NumberBasicBlock(Module &M) {
+    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
     for (auto &F : M) {
       if (F.empty() || F.hasLinkOnceLinkage() || F.getSection() == ".text.startup") {
         continue;
@@ -56,6 +57,7 @@ struct IndirectBranch : public FunctionPass {
               if (BBIndex.count(Succ) == 0) {
                 BBTargets.push_back(Succ);
                 BBIndex[Succ] = 0;
+                BBKeys[Succ] = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
               }
             }
           }
@@ -70,9 +72,9 @@ struct IndirectBranch : public FunctionPass {
     FunctionBBs.clear();
     FunctionBrs.clear();
     BBTargets.clear();
+    BBKeys.clear();
 
     auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
-    ModuleKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
     NumberBasicBlock(M);
     if (BBTargets.empty()) {
       return false;
@@ -109,7 +111,7 @@ struct IndirectBranch : public FunctionPass {
         APInt preIndex(32, BBIndex[BB]);
         preIndex = preIndex.rotl(j).byteSwap();
         Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, ModuleKey);
+        toWriteData = ConstantExpr::getXor(toWriteData, BBKeys[BB]);
         toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
         ConstantBBIndex.push_back(toWriteData);
         BBIndex[BB] = j;
@@ -209,6 +211,7 @@ struct IndirectBranch : public FunctionPass {
           ConstantInt::get(Int32Ty, FuncBBIndex[FBB]) ;
 
         auto NextIndex = IRB.CreateSelect(Cond, TIndex, FIndex);
+        auto BBKey = IRB.CreateSelect(Cond, BBKeys[TBB], BBKeys[FBB]);
         for (int j = FuncBBPage.size() - 1; j >= 0; --j) {
           auto TargetPage = FuncBBPage[j];
           auto OriginIndex = NextIndex;
@@ -237,7 +240,7 @@ struct IndirectBranch : public FunctionPass {
           if (j) {
             NextIndex = IRB.CreateLoad(Int32Ty, GEP);
             NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
-            NextIndex = IRB.CreateXor(NextIndex, ModuleKey);
+            NextIndex = IRB.CreateXor(NextIndex, BBKey);
             NextIndex = IRB.CreateCall(
               Intrinsic::getOrInsertDeclaration(&M, Intrinsic::bswap, {NextIndex->getType()}),
               {NextIndex});
