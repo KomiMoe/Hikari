@@ -6,6 +6,9 @@
 #include "llvm/IR/DiagnosticInfo.h"
 #include "llvm/IR/EHPersonalities.h"
 #include "llvm/IR/NoFolder.h"
+#include "llvm/CryptoUtils.h"
+
+#include <random>
 
 // Shamefully borrowed from ../Scalar/RegToMem.cpp :(
 bool valueEscapes(Instruction *Inst) {
@@ -175,4 +178,218 @@ bool expandConstantExpr(Function &F) {
     }
   }
   return Changed;
+}
+
+void createPageTable(const CreatePageTableArgs &args) {
+  const auto Int32Ty = IntegerType::getInt32Ty(args.M->getContext());
+  std::mt19937_64 re(args.RandomEngine->get_uint64_t());
+  std::shuffle(args.Objects->begin(), args.Objects->end(), re);
+
+  std::vector<Constant *> GVObjects;
+  for (unsigned i = 0; i < args.Objects->size(); ++i) {
+    auto Obj = args.Objects->at(i);
+    GVObjects.push_back(ConstantExpr::getBitCast(Obj, PointerType::getUnqual(Obj->getType())));
+    args.IndexMap->insert_or_assign(Obj, i);
+  }
+
+  {
+    auto GVNameObjects(args.GVNamePrefix + "_objects");
+    auto ATy = ArrayType::get(GVObjects[0]->getType(), GVObjects.size());
+    auto CA = ConstantArray::get(ATy, ArrayRef(GVObjects));
+    auto GV = new GlobalVariable(*args.M, ATy, false, 
+                                 GlobalValue::LinkageTypes::PrivateLinkage,
+                                 CA, GVNameObjects);
+    args.OutPageTable->push_back(GV);
+  }
+
+  for (unsigned i = 0; i < args.CountLoop; ++i) {
+    std::shuffle(args.Objects->begin(), args.Objects->end(), re);
+
+    std::vector<Constant *> ConstantObjectIndex;
+    for (unsigned j = 0; j < args.Objects->size(); ++j) {
+      const auto Obj = args.Objects->at(j);
+      const auto ObjFullKey = args.ObjectKeys->at(Obj);
+      const auto ObjKey = static_cast<uint32_t>(ObjFullKey);
+      const auto ObjMask = static_cast<uint32_t>(ObjFullKey >> 32);
+
+      APInt preIndex(32, args.IndexMap->at(Obj));
+      for (unsigned k = 0; k < 4; ++k) {
+        switch (static_cast<uint8_t>(ObjMask >> (k * 3)) % 6) {
+        default:
+          preIndex = -preIndex;
+          break;
+        case 1:
+          preIndex = preIndex.rotr(ObjKey - j);
+          break;
+        case 2:
+          preIndex = preIndex.rotl(ObjKey + j);
+          break;
+        case 3:
+          preIndex = preIndex.byteSwap();
+          break;
+        case 4:
+          preIndex = ~preIndex;
+          break;
+        case 5:
+          preIndex = preIndex ^ ObjKey;
+          break;
+        }
+      }
+      auto toWriteData = ConstantInt::get(Int32Ty, preIndex);
+      ConstantObjectIndex.push_back(toWriteData);
+      args.IndexMap->insert_or_assign(Obj, j);
+    }
+
+    {
+
+      auto GVNameObjPageTable(args.GVNamePrefix + "_page_table_" + std::to_string(i));
+      auto IATy = ArrayType::get(Int32Ty, ConstantObjectIndex.size());
+      auto IA = ConstantArray::get(IATy, ArrayRef(ConstantObjectIndex));
+      auto GV = new GlobalVariable(*args.M, IATy, false,
+                                   GlobalValue::LinkageTypes::PrivateLinkage,
+                                   IA, GVNameObjPageTable);
+      args.OutPageTable->push_back(GV);
+    }
+  }
+
+}
+
+void enhancedPageTable(const CreatePageTableArgs &args, std::unordered_map<Constant *, unsigned> *FuncIndexMap) {
+  const auto Int32Ty = IntegerType::getInt32Ty(args.M->getContext());
+  std::mt19937_64 re(args.RandomEngine->get_uint64_t());
+
+  for (unsigned i = 0; i < args.CountLoop; ++i) {
+    std::shuffle(args.Objects->begin(), args.Objects->end(), re);
+    std::vector<Constant *> ConstantObjectIndex;
+    for (unsigned j = 0; j < args.Objects->size(); ++j) {
+      auto Obj = args.Objects->at(j);
+      const auto ObjFullKey = args.ObjectKeys->at(Obj);
+      const auto ObjKey = static_cast<uint32_t>(ObjFullKey);
+      const auto ObjMask = static_cast<uint32_t>(ObjFullKey >> 32);
+
+      APInt preIndex(32, FuncIndexMap->find(Obj) == FuncIndexMap->end() ?
+                           args.IndexMap->at(Obj) :
+                           FuncIndexMap->at(Obj));
+
+      for (unsigned k = 0; k < 2 * args.CountLoop; ++k) {
+        switch (static_cast<uint8_t>(ObjMask >> (k * 2)) % 6) {
+        default:
+          preIndex = -preIndex;
+          break;
+        case 1:
+          preIndex = preIndex.rotr(ObjKey - j);
+          break;
+        case 2:
+          preIndex = preIndex.rotl(ObjKey + j);
+          break;
+        case 3:
+          preIndex = preIndex.byteSwap();
+          break;
+        case 4:
+          preIndex = ~preIndex;
+          break;
+        case 5:
+          preIndex = preIndex ^ ObjKey;
+          break;
+        }
+      }
+      auto toWriteData = ConstantInt::get(Int32Ty, preIndex);
+      ConstantObjectIndex.push_back(toWriteData);
+      FuncIndexMap->insert_or_assign(Obj, j);
+    }
+
+    {
+      auto GVNameObjPage(args.GVNamePrefix + "_enhanced_page_table_" + std::to_string(i));
+      auto IATy = ArrayType::get(Int32Ty, ConstantObjectIndex.size());
+      auto IA = ConstantArray::get(IATy, ArrayRef(ConstantObjectIndex));
+      auto GV = new GlobalVariable(*args.M, IATy, false, GlobalValue::LinkageTypes::InternalLinkage,
+        IA, GVNameObjPage);
+      args.OutPageTable->push_back(GV);
+    }
+  }
+}
+
+Value * buildDecryptIR(const BuildDecryptArgs &args) {
+  auto M = args.Fn->getParent();
+  auto& Ctx = args.Fn->getContext();
+  auto Int32Ty = IntegerType::getInt32Ty(Ctx);
+  auto Zero = ConstantInt::getNullValue(Int32Ty);
+  const auto ModuleKey = static_cast<uint32_t>(args.ModuleKey);
+  const auto ModuleMask = static_cast<uint32_t>(args.ModuleKey >> 32);
+  const auto FuncKey = static_cast<uint32_t>(args.FuncKey);
+  const auto FuncMask = static_cast<uint32_t>(args.FuncKey >> 32);
+  IRBuilder<> IRB{args.InsertBefore};
+
+  Value *NextIndex = ConstantInt::get(Int32Ty, args.NextIndex);
+
+  auto createDecIndexSwitch = [&IRB, &M](uint8_t mask, Value *NextIndex, Value *PrevIndex, Value* ObjKey) -> Value* {
+    switch (mask) {
+    default:
+      // preIndex = -preIndex;
+      NextIndex = IRB.CreateNeg(NextIndex);
+      break;
+    case 1:
+      // preIndex = preIndex.rotr(ObjKey - j);
+      NextIndex = IRB.CreateCall(
+        Intrinsic::getOrInsertDeclaration(M, Intrinsic::fshl, {NextIndex->getType()}),
+        {NextIndex, NextIndex, IRB.CreateSub(ObjKey, PrevIndex)});
+      break;
+    case 2:
+      // preIndex = preIndex.rotl(ObjKey + j);
+      NextIndex = IRB.CreateCall(
+        Intrinsic::getOrInsertDeclaration(M, Intrinsic::fshr, {NextIndex->getType()}),
+        {NextIndex, NextIndex, IRB.CreateAdd(ObjKey, PrevIndex)});
+      break;
+    case 3:
+      // preIndex = preIndex.byteSwap();
+      NextIndex = IRB.CreateCall(
+        Intrinsic::getOrInsertDeclaration(M, Intrinsic::bswap, {NextIndex->getType()}),
+        {NextIndex});
+      break;
+    case 4:
+      // preIndex.flipAllBits();
+      NextIndex = IRB.CreateNot(NextIndex);
+      break;
+    case 5:
+      // preIndex = preIndex ^ ObjKey;
+      NextIndex = IRB.CreateXor(NextIndex, ObjKey);
+      break;
+    }
+    return NextIndex;
+  };
+
+  if (args.FuncLoopCount && !args.FuncPageTable->empty()) {
+    auto ConstantFuncKey = ConstantInt::get(Int32Ty, FuncKey);
+
+    for (int i = args.FuncPageTable->size() - 1; i >= 0; --i) {
+      auto TargetPage = args.FuncPageTable->at(i);
+      auto PrevIndex = NextIndex;
+      Value *GEP = IRB.CreateGEP(
+          TargetPage->getValueType(), TargetPage,
+          {Zero, NextIndex});
+      NextIndex = IRB.CreateLoad(Int32Ty, GEP);
+      for (int j = 2 * args.FuncLoopCount - 1; j >= 0; --j) {
+        NextIndex = createDecIndexSwitch(static_cast<uint8_t>(FuncMask >> (j * 2)) % 6, NextIndex, PrevIndex, ConstantFuncKey);
+      }
+    }
+  }
+
+  auto ConstantModuleKey = ConstantInt::get(Int32Ty, ModuleKey);
+
+  for (int i = args.ModulePageTable->size() - 1; i >= 0; --i) {
+    auto TargetPage = args.ModulePageTable->at(i);
+    auto PrevIndex = NextIndex;
+    Value *GEP = IRB.CreateGEP(
+      TargetPage->getValueType(), TargetPage,
+      {Zero, NextIndex});
+    if (i) {
+      NextIndex = IRB.CreateLoad(Int32Ty, GEP);
+      for (int j = 4 - 1; j >= 0; --j) {
+        NextIndex = createDecIndexSwitch(static_cast<uint8_t>(ModuleMask >> (j * 3)) % 6, NextIndex, PrevIndex, ConstantModuleKey);
+      }
+      continue;
+    }
+    return IRB.CreateLoad(args.LoadTy, GEP);
+  }
+  llvm_unreachable("BuildDecryptIR unreachable!!!");
 }

@@ -18,15 +18,19 @@ namespace {
 struct IndirectCall : public FunctionPass {
   static char ID;
   unsigned pointerSize;
-  
   ObfuscationOptions *ArgsOptions;
-  std::map<Function *, unsigned> CalleeIndex;
-  std::vector<GlobalVariable *> CalleePage;
-  std::map<Function *, std::vector<CallInst *>> FunctionCallSites;
-  std::map<Function *, std::vector<Function *>> FunctionCallees;
-  std::vector<Function *> Callees;
+
+  std::unordered_map<Function *, std::set<CallInst *>> FunctionCallSites;
+  std::unordered_map<Function *, std::set<Function *>> FunctionCallees;
+
+  std::vector<Constant *> Callees;
+  std::unordered_map<Constant *, unsigned> CalleeIndex;
+  // 63 - 32====31 - 0
+  //  Mask=======Key
+  std::unordered_map<Constant *, uint64_t> CalleeKeys;
+  std::vector<GlobalVariable *> CalleePageTable;
+
   CryptoUtils RandomEngine;
-  std::map<Function *, Constant *> CalleeKeys;
   bool RunOnFuncChanged = false;
 
   IndirectCall(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
@@ -37,7 +41,6 @@ struct IndirectCall : public FunctionPass {
   StringRef getPassName() const override { return {"IndirectCall"}; }
 
   void NumberCallees(Module &M) {
-    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
     for (auto &F : M) {
       if (F.isIntrinsic()) {
         continue;
@@ -57,15 +60,13 @@ struct IndirectCall : public FunctionPass {
             if (Callee->isIntrinsic()) {
               continue;
             }
-            FunctionCallSites[&F].push_back(CI);
-            if (std::find(FunctionCallees[&F].begin(), FunctionCallees[&F].end(), Callee)
-                == FunctionCallees[&F].end()) {
-              FunctionCallees[&F].push_back(Callee);
-            }
-            if (CalleeIndex.count(Callee) == 0) {
-              CalleeIndex[Callee] = {};
+
+            FunctionCallSites[&F].emplace(CI);
+            FunctionCallees[&F].emplace(Callee);
+
+            if (CalleeKeys.count(Callee) == 0) {
               Callees.push_back(Callee);
-              CalleeKeys[Callee] = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
+              CalleeKeys[Callee] = RandomEngine.get_uint64_t();
             }
           }
         }
@@ -78,63 +79,25 @@ struct IndirectCall : public FunctionPass {
     FunctionCallSites.clear();
     FunctionCallees.clear();
     Callees.clear();
-    CalleePage.clear();
+    CalleePageTable.clear();
     CalleeKeys.clear();
-    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
 
     NumberCallees(M);
     if (!Callees.size()) {
       return false;
     }
 
-    auto seed = RandomEngine.get_uint64_t();
-    std::default_random_engine e(seed);
-    std::shuffle(Callees.begin(), Callees.end(), e);
+    CreatePageTableArgs createPageTableArgs;
+    createPageTableArgs.CountLoop = 1;
+    createPageTableArgs.GVNamePrefix = M.getName().str() + "_IndirectCallee" ;
+    createPageTableArgs.RandomEngine = &RandomEngine;
+    createPageTableArgs.M = &M;
+    createPageTableArgs.Objects = &Callees;
+    createPageTableArgs.IndexMap = &CalleeIndex;
+    createPageTableArgs.ObjectKeys = &CalleeKeys;
+    createPageTableArgs.OutPageTable = &CalleePageTable;
 
-    std::vector<Constant *> GVCallees;
-    for (unsigned i = 0; i < Callees.size(); ++i) {
-      auto Callee = Callees[i];
-      GVCallees.push_back(ConstantExpr::getBitCast(Callee, PointerType::getUnqual(M.getContext())));
-      CalleeIndex[Callee] = i;
-    }
-
-    {
-      std::string GVNameCallees(M.getName().str() + "_IndirectCallees");
-      ArrayType *ATy = ArrayType::get(GVCallees[0]->getType(), GVCallees.size());
-      Constant *CA = ConstantArray::get(ATy, ArrayRef(GVCallees));
-      auto GV = new GlobalVariable(M, ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        CA, GVNameCallees);
-      CalleePage.push_back(GV);
-    }
-
-    for (unsigned i = 0; i < 1; ++i) {
-      seed = RandomEngine.get_uint64_t();
-      e = std::default_random_engine(seed);
-      std::shuffle(Callees.begin(), Callees.end(), e);
-
-      std::vector<Constant *> ConstantCalleeIndex;
-      for (unsigned j = 0; j < Callees.size(); ++j) {
-        auto Callee = Callees[j];
-        APInt preIndex(32, CalleeIndex[Callee]);
-        preIndex = preIndex.rotl(j).byteSwap();
-        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, CalleeKeys[Callee]);
-        toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
-        ConstantCalleeIndex.push_back(toWriteData);
-        CalleeIndex[Callee] = j;
-      }
-
-      {
-
-        std::string GVNameCalleePage(M.getName().str() + "_IndirectCalleePage_" + std::to_string(i));
-        auto IATy = ArrayType::get(Int32Ty, ConstantCalleeIndex.size());
-        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantCalleeIndex));
-        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-          IA, GVNameCalleePage);
-        CalleePage.push_back(GV);
-      }
-    }
-
+    createPageTable(createPageTableArgs);
     return false;
   }
 
@@ -144,59 +107,40 @@ struct IndirectCall : public FunctionPass {
       return false;
     }
 
-    LLVMContext &Ctx = Fn.getContext();
     auto& M = *Fn.getParent();
 
     if (Callees.empty()) {
       return false;
     }
     const auto& CallSites = FunctionCallSites[&Fn];
-    auto& FuncCallees = FunctionCallees[&Fn];
+    auto& FuncCalleesSet = FunctionCallees[&Fn];
 
-    if (CallSites.empty() || FuncCallees.empty()) {
+    if (CallSites.empty() || FuncCalleesSet.empty()) {
       return false;
     }
 
-    auto Int32Ty = IntegerType::getInt32Ty(Ctx);
-    auto Zero = ConstantInt::getNullValue(Int32Ty);
-    ConstantInt *FuncKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
+    std::vector<Constant *> FuncCallees;
+    std::unordered_map<Constant *, uint64_t> FuncKeys;
+    for (auto callee : FuncCalleesSet) {
+      FuncCallees.push_back(callee);
+      FuncKeys[callee] = RandomEngine.get_uint64_t();
+    }
 
-    std::vector<GlobalVariable *> FuncCalleePage;
-    std::map<Function *, unsigned> FuncCalleeIndex;
-    for (unsigned i = 0; i < opt.level(); ++i) {
-      auto seed = RandomEngine.get_uint64_t();
-      auto e = std::default_random_engine(seed);
-      std::shuffle(FuncCallees.begin(), FuncCallees.end(), e);
+    std::vector<GlobalVariable *> FuncCalleePageTable;
+    std::unordered_map<Constant *, unsigned> FuncCalleeIndex;
 
-      std::vector<Constant *> ConstantCalleeIndex;
-      for (unsigned j = 0; j < FuncCallees.size(); ++j) {
-        auto Callee = FuncCallees[j];
+    if (opt.level()) {
+      CreatePageTableArgs createPageTableArgs;
+      createPageTableArgs.CountLoop = opt.level();
+      createPageTableArgs.GVNamePrefix = M.getName().str() + Fn.getName().str() + "_IndirectCallee" ;
+      createPageTableArgs.RandomEngine = &RandomEngine;
+      createPageTableArgs.M = &M;
+      createPageTableArgs.Objects = &FuncCallees;
+      createPageTableArgs.IndexMap = &CalleeIndex;
+      createPageTableArgs.ObjectKeys = &FuncKeys;
+      createPageTableArgs.OutPageTable = &FuncCalleePageTable;
 
-        APInt preIndex(32, FuncCalleeIndex.find(Callee) == FuncCalleeIndex.end() ?
-                             CalleeIndex[Callee] :
-                             FuncCalleeIndex[Callee]);
-
-        preIndex = preIndex.rotr(j);
-        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, FuncKey);
-        if (opt.level() > 1) {
-          toWriteData = ConstantExpr::getSub(toWriteData, ConstantInt::get(Int32Ty, j));
-        }
-        if (opt.level() > 2) {
-          toWriteData = ConstantExpr::getNeg(toWriteData);
-        }
-        ConstantCalleeIndex.push_back(toWriteData);
-        FuncCalleeIndex[Callee] = j;
-      }
-
-      {
-        std::string GVNameCalleePage(M.getName().str() + "_" + Fn.getName().str() + "_IndirectCalleePage_" + std::to_string(i));
-        auto IATy = ArrayType::get(Int32Ty, ConstantCalleeIndex.size());
-        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantCalleeIndex));
-        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::InternalLinkage,
-          IA, GVNameCalleePage);
-        FuncCalleePage.push_back(GV);
-      }
+      enhancedPageTable(createPageTableArgs, &FuncCalleeIndex);
     }
 
     for (auto CI : CallSites) {
@@ -210,57 +154,24 @@ struct IndirectCall : public FunctionPass {
           continue;
         }
       }
-      IRBuilder<> IRB(CB);
 
-      Value *NextIndex = FuncCalleeIndex.find(Callee) == FuncCalleeIndex.end() ?
-                           ConstantInt::get(Int32Ty, CalleeIndex[Callee]) :
-                           ConstantInt::get(Int32Ty, FuncCalleeIndex[Callee]) ;
+      BuildDecryptArgs buildDecrypt;
+      buildDecrypt.FuncLoopCount = opt.level();
+      buildDecrypt.NextIndex = opt.level() ?
+                                 FuncCalleeIndex[Callee] :
+                                 CalleeIndex[Callee];
+      buildDecrypt.Fn = &Fn;
+      buildDecrypt.InsertBefore = CB;
+      buildDecrypt.LoadTy = Callee->getType();
+      buildDecrypt.ModulePageTable = &CalleePageTable;
+      buildDecrypt.FuncPageTable = &FuncCalleePageTable;
+      buildDecrypt.ModuleKey = CalleeKeys[Callee];
+      buildDecrypt.FuncKey = FuncKeys[Callee];
 
-      for (int i = FuncCalleePage.size() - 1; i >= 0; --i) {
-        auto TargetPage = FuncCalleePage[i];
-        auto OriginIndex = NextIndex;
-        Value *GEP = IRB.CreateGEP(
-          TargetPage->getValueType(), TargetPage,
-          {Zero, NextIndex});
-        NextIndex = IRB.CreateLoad(Int32Ty, GEP);
-        if (opt.level() > 2) {
-          NextIndex = IRB.CreateNeg(NextIndex);
-        }
-        if (opt.level() > 1) {
-          NextIndex = IRB.CreateAdd(NextIndex, OriginIndex);
-        }
-        NextIndex = IRB.CreateXor(NextIndex, FuncKey);
-        NextIndex = IRB.CreateCall(
-          Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshl, {NextIndex->getType()}),
-          {NextIndex, NextIndex, OriginIndex});
-      }
 
-      for (int i = CalleePage.size() - 1; i >= 0; --i) {
-        auto TargetPage = CalleePage[i];
-        auto OriginIndex = NextIndex;
-        Value *GEP = IRB.CreateGEP(
-          TargetPage->getValueType(), TargetPage,
-          {Zero, NextIndex});
-        if (i) {
-          NextIndex = IRB.CreateLoad(Int32Ty, GEP);
-          NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
-          NextIndex = IRB.CreateXor(NextIndex, CalleeKeys[Callee]);
-          NextIndex = IRB.CreateCall(
-              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::bswap, {NextIndex->getType()}),
-              {NextIndex});
-
-          NextIndex = IRB.CreateCall(
-              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshr, {NextIndex->getType()}),
-              {NextIndex, NextIndex, OriginIndex});
-          continue;
-        }
-
-        Value *FnPtr = IRB.CreateLoad(
-          Callee->getType(), GEP,
-          CI->getName());
-        FnPtr->setName("Call_" + Callee->getName());
-        CB->setCalledOperand(FnPtr);
-      }
+      auto FnPtr = buildDecryptIR(buildDecrypt);
+      FnPtr->setName("Call_" + Callee->getName());
+      CB->setCalledOperand(FnPtr);
     }
 
     RunOnFuncChanged = true;
@@ -268,10 +179,10 @@ struct IndirectCall : public FunctionPass {
   }
 
   bool doFinalization(Module & M) override {
-    if (!RunOnFuncChanged || CalleePage.empty()) {
+    if (!RunOnFuncChanged || CalleePageTable.empty()) {
       return false;
     }
-    for (auto calleePage : CalleePage) {
+    for (auto calleePage : CalleePageTable) {
       appendToCompilerUsed(M, {calleePage});
     }
     return true;
