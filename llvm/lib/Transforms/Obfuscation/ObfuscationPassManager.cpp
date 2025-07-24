@@ -6,8 +6,6 @@
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
 #include "llvm/IR/Module.h"
 
-#include <llvm/Transforms/Obfuscation/MicrosoftRTTIEraser.h>
-
 
 #define DEBUG_TYPE "ir-obfuscation"
 
