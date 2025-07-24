@@ -101,9 +101,7 @@ struct IndirectGlobalVariable : public FunctionPass {
       return false;
     }
 
-    LLVMContext &Ctx = Fn.getContext();
     auto& M = *Fn.getParent();
-
 
     if (GlobalVariables.empty()) {
       return false;
@@ -169,7 +167,10 @@ struct IndirectGlobalVariable : public FunctionPass {
           buildDecrypt.FuncKey = FuncKeys[GV];
 
           auto GVPtr = buildDecryptIR(buildDecrypt);
-          Inst->replaceUsesOfWith(GV, GVPtr);
+          if (PHI)
+            PHI->setIncomingValue(i, GVPtr);
+          else
+            Inst->replaceUsesOfWith(GV, GVPtr);
           RunOnFuncChanged = true;
         }
       }
