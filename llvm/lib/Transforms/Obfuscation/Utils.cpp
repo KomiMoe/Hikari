@@ -241,7 +241,7 @@ void createPageTable(const CreatePageTableArgs &args) {
     auto ATy = ArrayType::get(GVObjects[0]->getType(), GVObjects.size());
     auto CA = ConstantArray::get(ATy, ArrayRef(GVObjects));
     auto GV = new GlobalVariable(*args.M, ATy, false, 
-                                 GlobalValue::LinkageTypes::ExternalLinkage,
+                                 GlobalValue::LinkageTypes::InternalLinkage,
                                  CA, GVNameObjects);
     args.OutPageTable->push_back(GV);
   }
@@ -273,7 +273,7 @@ void createPageTable(const CreatePageTableArgs &args) {
       auto IATy = ArrayType::get(Int32Ty, ConstantObjectIndex.size());
       auto IA = ConstantArray::get(IATy, ArrayRef(ConstantObjectIndex));
       auto GV = new GlobalVariable(*args.M, IATy, false,
-                                   GlobalValue::LinkageTypes::ExternalLinkage,
+                                   GlobalValue::LinkageTypes::InternalLinkage,
                                    IA, GVNameObjPageTable);
       args.OutPageTable->push_back(GV);
     }
@@ -285,7 +285,7 @@ void enhancedPageTable(const CreatePageTableArgs &args, std::unordered_map<Const
   const auto Int32Ty = IntegerType::getInt32Ty(args.M->getContext());
   std::mt19937_64 re(args.RandomEngine->get_uint64_t());
 
-  for (unsigned i = 0; i < 1; ++i) {
+  for (unsigned i = 0; i < args.CountLoop; ++i) {
     std::shuffle(args.Objects->begin(), args.Objects->end(), re);
     std::vector<Constant *> ConstantObjectIndex;
     for (unsigned j = 0; j < args.Objects->size(); ++j) {
@@ -312,7 +312,7 @@ void enhancedPageTable(const CreatePageTableArgs &args, std::unordered_map<Const
       auto GVNameObjPage(args.GVNamePrefix + "_enhanced_page_table_" + std::to_string(i));
       auto IATy = ArrayType::get(Int32Ty, ConstantObjectIndex.size());
       auto IA = ConstantArray::get(IATy, ArrayRef(ConstantObjectIndex));
-      auto GV = new GlobalVariable(*args.M, IATy, false, GlobalValue::LinkageTypes::ExternalLinkage,
+      auto GV = new GlobalVariable(*args.M, IATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
         IA, GVNameObjPage);
       args.OutPageTable->push_back(GV);
     }
@@ -330,11 +330,14 @@ Value * buildDecryptIR(const BuildDecryptArgs &args) {
   const auto FuncMask = static_cast<uint32_t>(args.FuncKey >> 32);
   IRBuilder<> IRB{args.InsertBefore};
 
-  auto GVInitIndex = new GlobalVariable(*M, Int32Ty, false, GlobalValue::ExternalLinkage,
-                                        ConstantInt::get(Int32Ty, args.NextIndex), 
-                                        M->getName() + args.Fn->getName() + "_InitIndex" +
-                                        std::to_string(args.NextIndex));
-  Value *NextIndex = IRB.CreateLoad(Int32Ty, GVInitIndex);
+  Value *NextIndex = args.NextIndexValue;
+  if (!NextIndex) {
+    auto GVInitIndex = new GlobalVariable(*M, Int32Ty, false, GlobalValue::PrivateLinkage,
+      ConstantInt::get(Int32Ty, args.NextIndex), 
+      M->getName() + args.Fn->getName() + "_InitIndex" +
+      std::to_string(args.NextIndex));
+    NextIndex = IRB.CreateAlignedLoad(Int32Ty, GVInitIndex, Align{1}, true);
+  }
 
   auto createDecIndexSwitch = [&IRB, &M](uint8_t mask, Value *NextIndex, Value *PrevIndex, Value* ObjKey) -> Value* {
     switch (mask) {

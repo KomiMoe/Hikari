@@ -29,6 +29,7 @@ struct CreatePageTableArgs {
 struct BuildDecryptArgs {
   unsigned FuncLoopCount;
   unsigned NextIndex;
+  Value *NextIndexValue;
   Function *Fn;
   Instruction *InsertBefore;
   Type *LoadTy;

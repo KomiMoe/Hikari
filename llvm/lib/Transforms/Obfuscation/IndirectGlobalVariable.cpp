@@ -18,14 +18,16 @@ namespace {
 struct IndirectGlobalVariable : public FunctionPass {
   unsigned pointerSize;
   static char ID;
-  
   ObfuscationOptions *ArgsOptions;
-  std::map<GlobalVariable *, unsigned> GVIndex;
-  std::vector<GlobalVariable *> GVPage;
-  std::map<Function *, std::vector<GlobalVariable *>> FunctionGVs;
-  std::vector<GlobalVariable *> GlobalVariables;
+
+  std::unordered_map<Function *, std::set<GlobalVariable *>> FunctionGVs;
+
+  std::vector<Constant *> GlobalVariables;
+  std::unordered_map<Constant *, unsigned> GVIndex;
+  std::unordered_map<Constant *, uint64_t> GVKeys;
+  std::vector<GlobalVariable *> GVPageTable;
+
   CryptoUtils RandomEngine;
-  std::map<GlobalVariable *, Constant *> GVKeys;
   bool RunOnFuncChanged = false;
 
   IndirectGlobalVariable(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
@@ -36,7 +38,6 @@ struct IndirectGlobalVariable : public FunctionPass {
   StringRef getPassName() const override { return {"IndirectGlobalVariable"}; }
 
   void NumberGlobalVariable(Module &M) {
-    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
     for (auto &F : M) {
       if (F.isIntrinsic()) {
         continue;
@@ -55,15 +56,11 @@ struct IndirectGlobalVariable : public FunctionPass {
             if (GV->isThreadLocal() || GV->isDLLImportDependent()) {
               continue;
             }
-            if (std::find(FunctionGVs[&F].begin(), FunctionGVs[&F].end(), GV)
-                == FunctionGVs[&F].end()) {
-              FunctionGVs[&F].push_back(GV);
-            }
 
-            if (GVIndex.count(GV) == 0) {
-              GVIndex[GV] = 0;
+            FunctionGVs[&F].emplace(GV);
+            if (GVKeys.count(GV) == 0) {
               GlobalVariables.push_back(GV);
-              GVKeys[GV] = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
+              GVKeys[GV] = RandomEngine.get_uint64_t();
             }
           }
         }
@@ -73,63 +70,27 @@ struct IndirectGlobalVariable : public FunctionPass {
 
   bool doInitialization(Module &M) override {
     GVIndex.clear();
-    GVPage.clear();
+    GVPageTable.clear();
     FunctionGVs.clear();
     GlobalVariables.clear();
     GVKeys.clear();
-    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
 
     NumberGlobalVariable(M);
     if (GlobalVariables.empty()) {
       return false;
     }
-    auto seed = RandomEngine.get_uint64_t();
-    std::default_random_engine e(seed);
-    std::shuffle(GlobalVariables.begin(), GlobalVariables.end(), e);
 
-    std::vector<Constant *> GVGVs;
-    for (unsigned i = 0; i < GlobalVariables.size(); ++i) {
-      auto GV = GlobalVariables[i];
-      GVGVs.push_back(ConstantExpr::getBitCast(GV, PointerType::getUnqual(M.getContext())));
-      GVIndex[GV] = i;
-    }
+    CreatePageTableArgs createPageTableArgs;
+    createPageTableArgs.CountLoop = 1;
+    createPageTableArgs.GVNamePrefix = M.getName().str() + "_IndirectGVs" ;
+    createPageTableArgs.RandomEngine = &RandomEngine;
+    createPageTableArgs.M = &M;
+    createPageTableArgs.Objects = &GlobalVariables;
+    createPageTableArgs.IndexMap = &GVIndex;
+    createPageTableArgs.ObjectKeys = &GVKeys;
+    createPageTableArgs.OutPageTable = &GVPageTable;
 
-    {
-      std::string GVNameGVs(M.getName().str() + "_IndirectGVs");
-      ArrayType *ATy = ArrayType::get(GVGVs[0]->getType(), GVGVs.size());
-      Constant *CA = ConstantArray::get(ATy, ArrayRef(GVGVs));
-      auto GV = new GlobalVariable(M, ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-        CA, GVNameGVs);
-      GVPage.push_back(GV);
-    }
-
-    for (unsigned i = 0; i < 1; ++i) {
-      seed = RandomEngine.get_uint64_t();
-      e = std::default_random_engine(seed);
-      std::shuffle(GlobalVariables.begin(), GlobalVariables.end(), e);
-
-      std::vector<Constant *> ConstantGVIndex;
-      for (unsigned j = 0; j < GlobalVariables.size(); ++j) {
-        auto GV = GlobalVariables[j];
-        APInt preIndex(32, GVIndex[GV]);
-        preIndex = preIndex.rotl(j).byteSwap();
-        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, GVKeys[GV]);
-        toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
-        ConstantGVIndex.push_back(toWriteData);
-        GVIndex[GV] = j;
-      }
-
-      {
-
-        std::string GVNameGVPage(M.getName().str() + "_IndirectGVPage_" + std::to_string(i));
-        auto IATy = ArrayType::get(Int32Ty, ConstantGVIndex.size());
-        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantGVIndex));
-        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-          IA, GVNameGVPage);
-        GVPage.push_back(GV);
-      }
-    }
+    createPageTable(createPageTableArgs);
     return false;
   }
 
@@ -148,53 +109,34 @@ struct IndirectGlobalVariable : public FunctionPass {
       return false;
     }
 
-    auto& FuncGVs = FunctionGVs[&Fn];
-    if (FunctionGVs.empty()) {
+    auto& FuncGVSet = FunctionGVs[&Fn];
+    if (FuncGVSet.empty()) {
       return false;
     }
 
-    auto Int32Ty = IntegerType::getInt32Ty(Ctx);
-    auto Zero = ConstantInt::getNullValue(Int32Ty);
-    ConstantInt *FuncKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
-
-    std::vector<GlobalVariable *> FuncGVPage;
-    std::map<GlobalVariable *, unsigned> FuncGVIndex;
-    for (unsigned i = 0; i < opt.level(); ++i) {
-      auto seed = RandomEngine.get_uint64_t();
-      auto e = std::default_random_engine(seed);
-      std::shuffle(FuncGVs.begin(), FuncGVs.end(), e);
-
-      std::vector<Constant *> ConstantGVIndex;
-      for (unsigned j = 0; j < FuncGVs.size(); ++j) {
-        auto GV = FuncGVs[j];
-
-        APInt preIndex(32, FuncGVIndex.find(GV) == FuncGVIndex.end() ?
-                             GVIndex[GV] :
-                             FuncGVIndex[GV]);
-        
-        preIndex = preIndex.rotr(j);
-        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, FuncKey);
-        if (opt.level() > 1) {
-          toWriteData = ConstantExpr::getSub(toWriteData, ConstantInt::get(Int32Ty, j));
-        }
-        if (opt.level() > 2) {
-          toWriteData = ConstantExpr::getNeg(toWriteData);
-        }
-        ConstantGVIndex.push_back(toWriteData);
-        FuncGVIndex[GV] = j;
-      }
-
-      {
-        std::string GVNameGVPage(M.getName().str() + "_" + Fn.getName().str() + "_IndirectGVPage_" + std::to_string(i));
-        auto IATy = ArrayType::get(Int32Ty, ConstantGVIndex.size());
-        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantGVIndex));
-        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::InternalLinkage,
-          IA, GVNameGVPage);
-        FuncGVPage.push_back(GV);
-      }
+    std::vector<Constant *> FuncGVs;
+    std::unordered_map<Constant *, uint64_t> FuncKeys;
+    for (auto GV : FuncGVSet) {
+      FuncGVs.push_back(GV);
+      FuncKeys[GV] = RandomEngine.get_uint64_t();
     }
 
+    std::vector<GlobalVariable *> FuncGVPageTable;
+    std::unordered_map<Constant *, unsigned> FuncGVIndex;
+
+    if (opt.level()) {
+      CreatePageTableArgs createPageTableArgs;
+      createPageTableArgs.CountLoop = opt.level();
+      createPageTableArgs.GVNamePrefix = M.getName().str() + Fn.getName().str() + "_IndirectGVs" ;
+      createPageTableArgs.RandomEngine = &RandomEngine;
+      createPageTableArgs.M = &M;
+      createPageTableArgs.Objects = &FuncGVs;
+      createPageTableArgs.IndexMap = &GVIndex;
+      createPageTableArgs.ObjectKeys = &FuncKeys;
+      createPageTableArgs.OutPageTable = &FuncGVPageTable;
+
+      enhancedPageTable(createPageTableArgs, &FuncGVIndex);
+    }
 
     for (inst_iterator I = inst_begin(Fn), E = inst_end(Fn); I != E; ++I) {
       Instruction *Inst = &*I;
@@ -208,57 +150,26 @@ struct IndirectGlobalVariable : public FunctionPass {
             continue;
           }
 
-          PHINode *PHI = dyn_cast<PHINode>(Inst);
-          IRBuilder<> IRB(PHI ? PHI->getIncomingBlock(i)->getTerminator() : Inst);
+          auto PHI = dyn_cast<PHINode>(Inst);
+          auto InsertPoint = PHI ? PHI->getIncomingBlock(i)->getTerminator() : Inst;
+          IRBuilder<> IRB(InsertPoint);
 
-          Value *NextIndex = FuncGVIndex.find(GV) == FuncGVIndex.end() ?
-            ConstantInt::get(Int32Ty, GVIndex[GV]) :
-            ConstantInt::get(Int32Ty, FuncGVIndex[GV]) ;
+          BuildDecryptArgs buildDecrypt;
+          buildDecrypt.FuncLoopCount = opt.level();
+          buildDecrypt.NextIndex = opt.level() ?
+                                     FuncGVIndex[GV] :
+                                     GVIndex[GV];
+          buildDecrypt.NextIndexValue = nullptr;
+          buildDecrypt.Fn = &Fn;
+          buildDecrypt.InsertBefore = InsertPoint;
+          buildDecrypt.LoadTy = GV->getType();
+          buildDecrypt.ModulePageTable = &GVPageTable;
+          buildDecrypt.FuncPageTable = &FuncGVPageTable;
+          buildDecrypt.ModuleKey = GVKeys[GV];
+          buildDecrypt.FuncKey = FuncKeys[GV];
 
-          for (int j = FuncGVPage.size() - 1; j >= 0; --j) {
-            auto TargetPage = FuncGVPage[j];
-            auto OriginIndex = NextIndex;
-            Value *GEP = IRB.CreateGEP(
-              TargetPage->getValueType(), TargetPage,
-              {Zero, NextIndex});
-            NextIndex = IRB.CreateLoad(Int32Ty, GEP);
-            if (opt.level() > 2) {
-              NextIndex = IRB.CreateNeg(NextIndex);
-            }
-            if (opt.level() > 1) {
-              NextIndex = IRB.CreateAdd(NextIndex, OriginIndex);
-            }
-            NextIndex = IRB.CreateXor(NextIndex, FuncKey);
-            NextIndex = IRB.CreateCall(
-              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshl, {NextIndex->getType()}),
-              {NextIndex, NextIndex, OriginIndex});
-          }
-
-          for (int j = GVPage.size() - 1; j >= 0; --j) {
-            auto TargetPage = GVPage[j];
-            auto OriginIndex = NextIndex;
-            Value *GEP = IRB.CreateGEP(
-              TargetPage->getValueType(), TargetPage,
-              {Zero, NextIndex});
-            if (j) {
-              NextIndex = IRB.CreateLoad(Int32Ty, GEP);
-              NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
-              NextIndex = IRB.CreateXor(NextIndex, GVKeys[GV]);
-              NextIndex = IRB.CreateCall(
-                Intrinsic::getOrInsertDeclaration(&M, Intrinsic::bswap, {NextIndex->getType()}),
-                {NextIndex});
-              NextIndex = IRB.CreateCall(
-                Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshr, {NextIndex->getType()}),
-                {NextIndex, NextIndex, OriginIndex});
-              continue;
-            }
-
-            Value *GVPtr = IRB.CreateLoad(
-              PointerType::getUnqual(Ctx), GEP,
-              GV->getName());
-            GVPtr = IRB.CreateBitCast(GVPtr, GV->getType());
-            Inst->replaceUsesOfWith(GV, GVPtr);
-          }
+          auto GVPtr = buildDecryptIR(buildDecrypt);
+          Inst->replaceUsesOfWith(GV, GVPtr);
           RunOnFuncChanged = true;
         }
       }
@@ -267,10 +178,10 @@ struct IndirectGlobalVariable : public FunctionPass {
     return true;
   }
   bool doFinalization(Module &M) override {
-    if (!RunOnFuncChanged || GVPage.empty()) {
+    if (!RunOnFuncChanged || GVPageTable.empty()) {
       return false;
     }
-    for (auto gvPage : GVPage) {
+    for (auto gvPage : GVPageTable) {
       appendToCompilerUsed(M, {gvPage});
     }
     return true;

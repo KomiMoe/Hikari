@@ -18,15 +18,17 @@ namespace {
 struct IndirectBranch : public FunctionPass {
   unsigned pointerSize;
   static char ID;
-  
   ObfuscationOptions *ArgsOptions;
-  std::map<BasicBlock *, unsigned> BBIndex;
-  std::vector<GlobalVariable *> BBPage;
-  std::map<Function *, std::vector<BasicBlock *>> FunctionBBs;
-  std::map<Function *, std::vector<BranchInst *>> FunctionBrs;
-  std::vector<BasicBlock *> BBTargets;        //all conditional branch targets
+
+  std::unordered_map<Function *, std::set<Constant *>> FunctionBBs;
+  std::unordered_map<Function *, std::set<BranchInst *>> FunctionBrs;
+
+  std::vector<Constant *> BBAddrTargets;
+  std::unordered_map<Constant *, unsigned> BBIndex;
+  std::unordered_map<Constant *, uint64_t> BBKeys;
+  std::vector<GlobalVariable *> BBPageTable;
+
   CryptoUtils RandomEngine;
-  std::map<BasicBlock *, Constant *> BBKeys;
   bool RunOnFuncChanged = false;
 
   IndirectBranch(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
@@ -37,27 +39,24 @@ struct IndirectBranch : public FunctionPass {
   StringRef getPassName() const override { return {"IndirectBranch"}; }
 
   void NumberBasicBlock(Module &M) {
-    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
     for (auto &F : M) {
       if (F.empty() || F.hasLinkOnceLinkage() || F.getSection() == ".text.startup") {
         continue;
       }
       SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(nullptr, nullptr));
+      uint64_t BBKey = RandomEngine.get_uint64_t();
       for (auto &BB : F) {
         if (auto *BI = dyn_cast<BranchInst>(BB.getTerminator())) {
           if (BI->isConditional()) {
-            FunctionBrs[&F].push_back(BI);
+            FunctionBrs[&F].emplace(BI);
             unsigned N = BI->getNumSuccessors();
             for (unsigned I = 0; I < N; I++) {
-              BasicBlock *Succ = BI->getSuccessor(I);
-              if (std::find(FunctionBBs[&F].begin(), FunctionBBs[&F].end(), Succ)
-                  == FunctionBBs[&F].end()) {
-                FunctionBBs[&F].push_back(Succ);
-              }
-              if (BBIndex.count(Succ) == 0) {
-                BBTargets.push_back(Succ);
-                BBIndex[Succ] = 0;
-                BBKeys[Succ] = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
+              BasicBlock *Successor = BI->getSuccessor(I);
+              auto BBAddr = BlockAddress::get(Successor);
+              FunctionBBs[&F].emplace(BBAddr);
+              if (BBKeys.count(BBAddr) == 0) {
+                BBAddrTargets.push_back(BBAddr);
+                BBKeys[BBAddr] = BBKey;
               }
             }
           }
@@ -68,66 +67,28 @@ struct IndirectBranch : public FunctionPass {
 
   bool doInitialization(Module &M) override {
     BBIndex.clear();
-    BBPage.clear();
+    BBPageTable.clear();
     FunctionBBs.clear();
     FunctionBrs.clear();
-    BBTargets.clear();
+    BBAddrTargets.clear();
     BBKeys.clear();
 
-    auto Int32Ty = IntegerType::getInt32Ty(M.getContext());
     NumberBasicBlock(M);
-    if (BBTargets.empty()) {
+    if (BBAddrTargets.empty()) {
       return false;
     }
 
-    auto seed = RandomEngine.get_uint64_t();
-    std::default_random_engine e(seed);
-    std::shuffle(BBTargets.begin(), BBTargets.end(), e);
+    CreatePageTableArgs createPageTableArgs;
+    createPageTableArgs.CountLoop = 1;
+    createPageTableArgs.GVNamePrefix = M.getName().str() + "_IndirectBr" ;
+    createPageTableArgs.RandomEngine = &RandomEngine;
+    createPageTableArgs.M = &M;
+    createPageTableArgs.Objects = &BBAddrTargets;
+    createPageTableArgs.IndexMap = &BBIndex;
+    createPageTableArgs.ObjectKeys = &BBKeys;
+    createPageTableArgs.OutPageTable = &BBPageTable;
 
-    std::vector<Constant *> GVBBs;
-    for (unsigned i = 0; i < BBTargets.size(); ++i) {
-      auto BB = BBTargets[i];
-      GVBBs.push_back(ConstantExpr::getBitCast(BlockAddress::get(BB), PointerType::getUnqual(M.getContext())));
-      BBIndex[BB] = i;
-    }
-
-    {
-      std::string GVNameBBs(M.getName().str() + "_IndirectBBs");
-      ArrayType *ATy = ArrayType::get(GVBBs[0]->getType(), GVBBs.size());
-      Constant *CA = ConstantArray::get(ATy, ArrayRef(GVBBs));
-      auto GV = new GlobalVariable(M, ATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-                                   CA, GVNameBBs);
-      BBPage.push_back(GV);
-    }
-
-    for (unsigned i = 0; i < 1; ++i) {
-      seed = RandomEngine.get_uint64_t();
-      e = std::default_random_engine(seed);
-      std::shuffle(BBTargets.begin(), BBTargets.end(), e);
-
-      std::vector<Constant *> ConstantBBIndex;
-      for (unsigned j = 0; j < BBTargets.size(); ++j) {
-        auto BB = BBTargets[j];
-        APInt preIndex(32, BBIndex[BB]);
-        preIndex = preIndex.rotl(j).byteSwap();
-        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, BBKeys[BB]);
-        toWriteData = ConstantExpr::getAdd(toWriteData, ConstantInt::get(Int32Ty, j));
-        ConstantBBIndex.push_back(toWriteData);
-        BBIndex[BB] = j;
-      }
-
-      {
-
-        std::string GVNameBBPage(M.getName().str() + "_IndirectBBPage_" + std::to_string(i));
-        auto IATy = ArrayType::get(Int32Ty, ConstantBBIndex.size());
-        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantBBIndex));
-        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
-          IA, GVNameBBPage);
-        BBPage.push_back(GV);
-      }
-    }
-
+    createPageTable(createPageTableArgs);
     return false;
   }
 
@@ -141,123 +102,79 @@ struct IndirectBranch : public FunctionPass {
     LLVMContext &Ctx = Fn.getContext();
     auto& M = *Fn.getParent();
 
-    if (BBTargets.empty()) {
+    if (BBAddrTargets.empty()) {
       return false;
     }
 
-
-    auto& FuncBBs = FunctionBBs[&Fn];
+    auto& FuncBBsSet = FunctionBBs[&Fn];
     auto& FuncBrs = FunctionBrs[&Fn];
-    if (FuncBBs.empty() || FuncBrs.empty()) {
+    if (FuncBBsSet.empty() || FuncBrs.empty()) {
       return false;
+    }
+
+    std::vector<Constant *> FuncBBs;
+    std::unordered_map<Constant *, uint64_t> FuncKeys;
+    auto FuncKey = RandomEngine.get_uint64_t();
+
+    for (auto bb : FuncBBsSet) {
+      FuncBBs.push_back(bb);
+      FuncKeys[bb] = FuncKey;
+    }
+
+    std::vector<GlobalVariable *> FuncBBPageTable;
+    std::unordered_map<Constant *, unsigned> FuncBBIndex;
+
+    if (opt.level()) {
+      CreatePageTableArgs createPageTableArgs;
+      createPageTableArgs.CountLoop = opt.level();
+      createPageTableArgs.GVNamePrefix = M.getName().str() + Fn.getName().str() + "_IndirectBr" ;
+      createPageTableArgs.RandomEngine = &RandomEngine;
+      createPageTableArgs.M = &M;
+      createPageTableArgs.Objects = &FuncBBs;
+      createPageTableArgs.IndexMap = &BBIndex;
+      createPageTableArgs.ObjectKeys = &FuncKeys;
+      createPageTableArgs.OutPageTable = &FuncBBPageTable;
+
+      enhancedPageTable(createPageTableArgs, &FuncBBIndex);
     }
 
     auto Int32Ty = IntegerType::getInt32Ty(Ctx);
-    auto Zero = ConstantInt::getNullValue(Int32Ty);
-    ConstantInt *FuncKey = ConstantInt::get(Int32Ty, RandomEngine.get_uint32_t());
-
-    std::vector<GlobalVariable *> FuncBBPage;
-    std::map<BasicBlock *, unsigned> FuncBBIndex;
-    for (unsigned i = 0; i < opt.level(); ++i) {
-      auto seed = RandomEngine.get_uint64_t();
-      auto e = std::default_random_engine(seed);
-      std::shuffle(FuncBBs.begin(), FuncBBs.end(), e);
-
-      std::vector<Constant *> ConstantBBIndex;
-      for (unsigned j = 0; j < FuncBBs.size(); ++j) {
-        auto BB = FuncBBs[j];
-
-        APInt preIndex(32, FuncBBIndex.find(BB) == FuncBBIndex.end() ?
-                             BBIndex[BB] :
-                             FuncBBIndex[BB]);
-
-        preIndex = preIndex.rotr(j);
-        Constant *toWriteData = ConstantInt::get(Int32Ty, preIndex);
-        toWriteData = ConstantExpr::getXor(toWriteData, FuncKey);
-        if (opt.level() > 1) {
-          toWriteData = ConstantExpr::getSub(toWriteData, ConstantInt::get(Int32Ty, j));
-        }
-        if (opt.level() > 2) {
-          toWriteData = ConstantExpr::getNeg(toWriteData);
-        }
-        ConstantBBIndex.push_back(toWriteData);
-        FuncBBIndex[BB] = j;
-      }
-
-      {
-        std::string GVNameBBPage(M.getName().str() + "_" + Fn.getName().str() + "_IndirectBBPage_" + std::to_string(i));
-        auto IATy = ArrayType::get(Int32Ty, ConstantBBIndex.size());
-        auto IA = ConstantArray::get(IATy, ArrayRef(ConstantBBIndex));
-        auto GV = new GlobalVariable(M, IATy, false, GlobalValue::LinkageTypes::InternalLinkage,
-          IA, GVNameBBPage);
-        FuncBBPage.push_back(GV);
-      }
-    }
-
     for (auto &BI : FuncBrs) {
       if (BI && BI->isConditional()) {
         IRBuilder<> IRB(BI);
 
         auto Cond = BI->getCondition();
-        auto TBB = BI->getSuccessor(0);
-        auto FBB = BI->getSuccessor(1);
+        auto TBB = BlockAddress::get(BI->getSuccessor(0));
+        auto FBB = BlockAddress::get(BI->getSuccessor(1));
 
-        auto TIndex = FuncBBIndex.find(TBB) == FuncBBIndex.end() ?
-          ConstantInt::get(Int32Ty, BBIndex[TBB]) :
-          ConstantInt::get(Int32Ty, FuncBBIndex[TBB]) ;
+        auto TIndex = opt.level() ?
+                        ConstantInt::get(Int32Ty, FuncBBIndex[TBB]) :
+                        ConstantInt::get(Int32Ty, BBIndex[TBB]);
 
-        auto FIndex = FuncBBIndex.find(FBB) == FuncBBIndex.end() ?
-          ConstantInt::get(Int32Ty, BBIndex[FBB]) :
-          ConstantInt::get(Int32Ty, FuncBBIndex[FBB]) ;
+        auto FIndex = opt.level() ?
+                        ConstantInt::get(Int32Ty, FuncBBIndex[FBB]) :
+                        ConstantInt::get(Int32Ty, BBIndex[FBB]);
 
         auto NextIndex = IRB.CreateSelect(Cond, TIndex, FIndex);
-        auto BBKey = IRB.CreateSelect(Cond, BBKeys[TBB], BBKeys[FBB]);
-        for (int j = FuncBBPage.size() - 1; j >= 0; --j) {
-          auto TargetPage = FuncBBPage[j];
-          auto OriginIndex = NextIndex;
-          Value *GEP = IRB.CreateGEP(
-            TargetPage->getValueType(), TargetPage,
-            {Zero, NextIndex});
-          NextIndex = IRB.CreateLoad(Int32Ty, GEP);
-          if (opt.level() > 2) {
-            NextIndex = IRB.CreateNeg(NextIndex);
-          }
-          if (opt.level() > 1) {
-            NextIndex = IRB.CreateAdd(NextIndex, OriginIndex);
-          }
-          NextIndex = IRB.CreateXor(NextIndex, FuncKey);
-          NextIndex = IRB.CreateCall(
-            Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshl, {NextIndex->getType()}),
-            {NextIndex, NextIndex, OriginIndex});
-        }
 
-        for (int j = BBPage.size() - 1; j >= 0; --j) {
-          auto TargetPage = BBPage[j];
-          auto OriginIndex = NextIndex;
-          Value *GEP = IRB.CreateGEP(
-            TargetPage->getValueType(), TargetPage,
-            {Zero, NextIndex});
-          if (j) {
-            NextIndex = IRB.CreateLoad(Int32Ty, GEP);
-            NextIndex = IRB.CreateSub(NextIndex, OriginIndex);
-            NextIndex = IRB.CreateXor(NextIndex, BBKey);
-            NextIndex = IRB.CreateCall(
-              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::bswap, {NextIndex->getType()}),
-              {NextIndex});
+        BuildDecryptArgs buildDecrypt;
+        buildDecrypt.FuncLoopCount = opt.level();
+        buildDecrypt.NextIndex = 0;
+        buildDecrypt.NextIndexValue = NextIndex;
+        buildDecrypt.Fn = &Fn;
+        buildDecrypt.InsertBefore = BI;
+        buildDecrypt.LoadTy = PointerType::getUnqual(Ctx);
+        buildDecrypt.ModulePageTable = &BBPageTable;
+        buildDecrypt.FuncPageTable = &FuncBBPageTable;
+        buildDecrypt.ModuleKey = BBKeys[TBB];
+        buildDecrypt.FuncKey = FuncKeys[TBB];
 
-            NextIndex = IRB.CreateCall(
-              Intrinsic::getOrInsertDeclaration(&M, Intrinsic::fshr, {NextIndex->getType()}),
-              {NextIndex, NextIndex, OriginIndex});
-            continue;
-          }
+        auto TargetPtr = buildDecryptIR(buildDecrypt);
+        IndirectBrInst *IBI = IndirectBrInst::Create(TargetPtr, 2);
+        IBI->addDestination(BI->getSuccessor(0));
+        IBI->addDestination(BI->getSuccessor(1));
+        ReplaceInstWithInst(BI, IBI);
 
-          Value *BBPtr = IRB.CreateLoad(
-              PointerType::getUnqual(Ctx), GEP);
-          IndirectBrInst *IBI = IndirectBrInst::Create(BBPtr, 2);
-          IBI->addDestination(BI->getSuccessor(0));
-          IBI->addDestination(BI->getSuccessor(1));
-          ReplaceInstWithInst(BI, IBI);
-        }
         RunOnFuncChanged = true;
       }
     }
@@ -266,10 +183,10 @@ struct IndirectBranch : public FunctionPass {
   }
 
   bool doFinalization(Module &M) override {
-    if (!RunOnFuncChanged || BBPage.empty()) {
+    if (!RunOnFuncChanged || BBPageTable.empty()) {
       return false;
     }
-    for (auto bbPage : BBPage) {
+    for (auto bbPage : BBPageTable) {
       appendToCompilerUsed(M, {bbPage});
     }
     return true;

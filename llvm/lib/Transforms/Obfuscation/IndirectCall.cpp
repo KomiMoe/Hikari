@@ -160,6 +160,7 @@ struct IndirectCall : public FunctionPass {
       buildDecrypt.NextIndex = opt.level() ?
                                  FuncCalleeIndex[Callee] :
                                  CalleeIndex[Callee];
+      buildDecrypt.NextIndexValue = nullptr;
       buildDecrypt.Fn = &Fn;
       buildDecrypt.InsertBefore = CB;
       buildDecrypt.LoadTy = Callee->getType();
