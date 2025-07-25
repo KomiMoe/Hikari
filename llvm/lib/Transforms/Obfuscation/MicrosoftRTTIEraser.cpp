@@ -33,6 +33,10 @@ public:
     initializeStringEncryptionPass(*PassRegistry::getPassRegistry());
   }
 
+  StringRef getPassName() const override {
+    return "MsRttiEraser";
+  }
+
   bool runOnModule(Module &M) override {
     auto &seed = ArgsOptions->randomSeed();
     if (seed.empty()) {

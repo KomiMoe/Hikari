@@ -32,6 +32,10 @@ public:
     }
     return PreservedAnalyses::all();
   }
+  
+  static llvm::StringRef name() {
+    return "ObfuscationPassManagerPass";
+  }
 };
 
 } // namespace llvm

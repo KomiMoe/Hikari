@@ -33,7 +33,7 @@ struct ConstantIntEncryption : public FunctionPass {
   }
 
   Value *createConstantIntEncrypt0(BasicBlock::iterator ip, ConstantInt *CIT) {
-    const auto          Module = ip->getModule();
+  StringRef getPassName() const override {
     IRBuilder<NoFolder> IRB(ip->getContext());
     IRB.SetInsertPoint(ip);
 
