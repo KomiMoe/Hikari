@@ -243,6 +243,7 @@ void createPageTable(const CreatePageTableArgs &args) {
     auto GV = new GlobalVariable(*args.M, ATy, false, 
                                  GlobalValue::LinkageTypes::InternalLinkage,
                                  CA, GVNameObjects);
+    GV->addMetadata("noobf", *MDNode::get(args.M->getContext(), {}));
     args.OutPageTable->push_back(GV);
   }
 
@@ -275,6 +276,7 @@ void createPageTable(const CreatePageTableArgs &args) {
       auto GV = new GlobalVariable(*args.M, IATy, false,
                                    GlobalValue::LinkageTypes::InternalLinkage,
                                    IA, GVNameObjPageTable);
+      GV->addMetadata("noobf", *MDNode::get(args.M->getContext(), {}));
       args.OutPageTable->push_back(GV);
     }
   }
@@ -314,6 +316,7 @@ void enhancedPageTable(const CreatePageTableArgs &args, std::unordered_map<Const
       auto IA = ConstantArray::get(IATy, ArrayRef(ConstantObjectIndex));
       auto GV = new GlobalVariable(*args.M, IATy, false, GlobalValue::LinkageTypes::PrivateLinkage,
         IA, GVNameObjPage);
+      GV->addMetadata("noobf", *MDNode::get(args.M->getContext(), {}));
       args.OutPageTable->push_back(GV);
     }
   }
@@ -336,6 +339,7 @@ Value * buildPageTableDecryptIR(const BuildDecryptArgs &args) {
       ConstantInt::get(Int32Ty, args.NextIndex), 
       M->getName() + args.Fn->getName() + "_InitIndex" +
       std::to_string(args.NextIndex));
+    GVInitIndex->addMetadata("noobf", *MDNode::get(Ctx, {}));
     NextIndex = IRB.CreateAlignedLoad(Int32Ty, GVInitIndex, Align{1}, true);
   }
 

@@ -56,6 +56,9 @@ struct IndirectGlobalVariable : public FunctionPass {
             if (GV->isThreadLocal() || GV->isDLLImportDependent()) {
               continue;
             }
+            if (GV->getMetadata("noobf")) {
+              continue;
+            }
 
             FunctionGVs[&F].emplace(GV);
             if (GVKeys.count(GV) == 0) {
