@@ -181,9 +181,10 @@ struct ObfuscationPassManager : public ModulePass {
     unsigned   pointerSize = M.getDataLayout().getTypeAllocSize(
         PointerType::getUnqual(M.getContext()));
 
+    add(llvm::createConstantIntEncryptionPass(Options.get()));
+
     add(llvm::createIndirectGlobalVariablePass(pointerSize, Options.get()));
 
-    add(llvm::createConstantIntEncryptionPass(Options.get()));
     add(llvm::createConstantFPEncryptionPass(Options.get()));
 
     if (EnableIRStringEncryption || Options->cseOpt()->isEnabled()) {
