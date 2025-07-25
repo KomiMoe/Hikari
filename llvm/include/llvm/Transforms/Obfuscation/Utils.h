@@ -46,5 +46,6 @@ void LowerConstantExpr(Function &F);
 bool expandConstantExpr(Function &F);
 void createPageTable(const CreatePageTableArgs& args);
 void enhancedPageTable(const CreatePageTableArgs& args, std::unordered_map<Constant *, unsigned> *FuncIndexMap);
-Value* buildDecryptIR(const BuildDecryptArgs& args);
+Value * buildPageTableDecryptIR(const BuildDecryptArgs& args);
+Value * encryptConstant(Constant *plainConstant, Instruction *insertBefore, CryptoUtils *randomEngine, unsigned level);
 #endif

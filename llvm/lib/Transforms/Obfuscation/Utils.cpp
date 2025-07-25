@@ -319,7 +319,7 @@ void enhancedPageTable(const CreatePageTableArgs &args, std::unordered_map<Const
   }
 }
 
-Value * buildDecryptIR(const BuildDecryptArgs &args) {
+Value * buildPageTableDecryptIR(const BuildDecryptArgs &args) {
   auto M = args.Fn->getParent();
   auto& Ctx = args.Fn->getContext();
   auto Int32Ty = IntegerType::getInt32Ty(Ctx);
@@ -437,4 +437,50 @@ Value * buildDecryptIR(const BuildDecryptArgs &args) {
     return IRB.CreateLoad(args.LoadTy, GEP);
   }
   llvm_unreachable("BuildDecryptIR unreachable!!!");
+}
+
+Value * encryptConstant(Constant *plainConstant, Instruction *insertBefore, CryptoUtils *randomEngine, unsigned level) {
+  auto& Ctx = insertBefore->getContext();
+  auto OriginValTy = plainConstant->getType();
+  if (OriginValTy->isStructTy() || OriginValTy->isArrayTy() || OriginValTy->isPointerTy()) {
+    return plainConstant;
+  }
+  auto BitWidth = plainConstant->getType()->getPrimitiveSizeInBits().getFixedValue();
+  if (BitWidth < 8) {
+    return plainConstant;
+  }
+  
+  const auto Key = ConstantInt::get(
+      IntegerType::get(Ctx, BitWidth),
+      randomEngine->get_uint64_t());
+
+  const auto ConstantInt = ConstantExpr::getBitCast(plainConstant, Key->getType());
+  auto Enc = ConstantExpr::getSub(ConstantInt, Key);
+  Constant *XorKey = nullptr;
+  if (level) {
+    XorKey = ConstantInt::get(Key->getType(), randomEngine->get_uint64_t());
+    Enc = ConstantExpr::getXor(Enc, XorKey);
+    if (level > 1) {
+      Enc = ConstantExpr::getXor(Enc, ConstantExpr::getMul(XorKey, Key));
+    }
+    if (level > 2) {
+      Enc = ConstantExpr::getXor(Enc, ConstantExpr::getNeg(XorKey));
+    }
+  }
+  auto EncGV = new GlobalVariable(*insertBefore->getModule(), Enc->getType(), false,
+                                  GlobalValue::InternalLinkage, Enc);
+  EncGV->addMetadata("noobf", *MDNode::get(Ctx, {}));
+  IRBuilder<NoFolder> IRB(insertBefore);
+  Value *Load = IRB.CreateAlignedLoad(Enc->getType(), EncGV, Align{1}, true);
+  if (level) {
+    if (level > 2) {
+      Load = IRB.CreateXor(Load, IRB.CreateNeg(XorKey));
+    }
+    if (level > 1) {
+      Load = IRB.CreateXor(Load, IRB.CreateMul(XorKey, Key));
+    }
+    Load = IRB.CreateXor(Load, XorKey);
+  }
+  Load = IRB.CreateAdd(Load, Key);
+  return IRB.CreateBitCast(Load, OriginValTy);
 }

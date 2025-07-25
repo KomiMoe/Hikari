@@ -170,7 +170,7 @@ struct IndirectCall : public FunctionPass {
       buildDecrypt.FuncKey = FuncKeys[Callee];
 
 
-      auto FnPtr = buildDecryptIR(buildDecrypt);
+      auto FnPtr = buildPageTableDecryptIR(buildDecrypt);
       FnPtr->setName("Call_" + Callee->getName());
       CB->setCalledOperand(FnPtr);
     }
