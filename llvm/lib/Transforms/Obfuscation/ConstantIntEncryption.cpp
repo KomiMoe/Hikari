@@ -26,135 +26,59 @@ namespace {
 struct ConstantIntEncryption : public FunctionPass {
   static char         ID;
   ObfuscationOptions *ArgsOptions;
+
+  std::unordered_map<Function *, std::set<Instruction *>> FunctionModifyIRs;
+
   CryptoUtils         RandomEngine;
 
   ConstantIntEncryption(ObfuscationOptions *argsOptions) : FunctionPass(ID) {
     this->ArgsOptions = argsOptions;
   }
 
-  Value *createConstantIntEncrypt0(BasicBlock::iterator ip, ConstantInt *CIT) {
   StringRef getPassName() const override {
-    IRBuilder<NoFolder> IRB(ip->getContext());
-    IRB.SetInsertPoint(ip);
-
-    const auto Key = ConstantInt::get(CIT->getType(),
-                                      RandomEngine.get_uint64_t());
-    const auto Enc = ConstantExpr::getSub(CIT, Key);
-    auto       GV = new GlobalVariable(*Module, Enc->getType(), false,
-                                       GlobalValue::LinkageTypes::PrivateLinkage,
-                                       Enc);
-    appendToCompilerUsed(*Module, {GV});
-    // outs() << I << " ->\n";
-    const auto Load = IRB.CreateLoad(Enc->getType(), GV);
-    const auto NewOpr = IRB.CreateAdd(Key, Load);
-    return NewOpr;
+    return "ConstantIntEncryption";
   }
 
-  Value *createConstantIntEncrypt1(BasicBlock::iterator ip, ConstantInt *CIT) {
-    const auto          Module = ip->getModule();
-    IRBuilder<NoFolder> IRB(ip->getContext());
-    IRB.SetInsertPoint(ip);
+  bool doInitialization(Module &M) override {
+    bool Changed = false;
+    for (auto& F : M) {
+      const auto opt = ArgsOptions->toObfuscate(ArgsOptions->cieOpt(), &F);
+      if (!opt.isEnabled()) {
+        continue;
+      }
+      Changed |= expandConstantExpr(F);
+      for (auto& BB : F) {
+        for (auto& I : BB) {
+          if (I.isEHPad() || isa<AllocaInst>(&I) ||
+              isa<IntrinsicInst>(&I) || isa<SwitchInst>(I)||
+              I.isAtomic()) {
+            continue;
+          }
+          auto CI = dyn_cast<CallInst>(&I);
+          auto GEP = dyn_cast<GetElementPtrInst>(&I);
+          auto PHI = dyn_cast<PHINode>(&I);
 
-    const auto Key = ConstantInt::get(CIT->getType(),
-                                      RandomEngine.get_uint64_t());
-    const auto XorKey = ConstantInt::get(CIT->getType(),
-                                         RandomEngine.get_uint64_t());
-
-    auto Enc = ConstantExpr::getSub(CIT, Key);
-    Enc = ConstantExpr::getXor(Enc, XorKey);
-
-    auto GV = new GlobalVariable(*Module, Enc->getType(), false,
-                                 GlobalValue::LinkageTypes::PrivateLinkage,
-                                 Enc);
-    appendToCompilerUsed(*Module, {GV});
-
-    auto GXorKey = new GlobalVariable(*Module, XorKey->getType(), false,
-                                      GlobalValue::LinkageTypes::PrivateLinkage,
-                                      XorKey);
-    appendToCompilerUsed(*Module, {GXorKey});
-
-    // outs() << I << " ->\n";
-    const auto Load = IRB.CreateLoad(Enc->getType(), GV);
-    const auto LoadXor = IRB.CreateLoad(XorKey->getType(), GXorKey);
-    const auto XorOpr = IRB.CreateXor(Load, LoadXor);
-    const auto NewOpr = IRB.CreateAdd(Key, XorOpr);
-    return NewOpr;
-  }
-
-  Value *createConstantIntEncrypt2(BasicBlock::iterator ip, ConstantInt *CIT) {
-    const auto          Module = ip->getModule();
-    IRBuilder<NoFolder> IRB(ip->getContext());
-    IRB.SetInsertPoint(ip);
-
-    const auto Key = ConstantInt::get(CIT->getType(),
-                                      RandomEngine.get_uint64_t());
-    const auto XorKey = ConstantInt::get(CIT->getType(),
-                                         RandomEngine.get_uint64_t());
-
-    const auto MulXorKey = ConstantExpr::getMul(Key, XorKey);
-
-    auto Enc = ConstantExpr::getSub(CIT, Key);
-    Enc = ConstantExpr::getXor(Enc, MulXorKey);
-
-    auto GV = new GlobalVariable(*Module, Enc->getType(), false,
-                                 GlobalValue::LinkageTypes::PrivateLinkage,
-                                 Enc);
-    appendToCompilerUsed(*Module, {GV});
-
-    auto GXorKey = new GlobalVariable(*Module, XorKey->getType(), false,
-                                      GlobalValue::LinkageTypes::PrivateLinkage,
-                                      XorKey);
-    appendToCompilerUsed(*Module, {GXorKey});
-
-    // outs() << I << " ->\n";
-    const auto Load = IRB.CreateLoad(Enc->getType(), GV);
-    const auto LoadXor = IRB.CreateLoad(XorKey->getType(), GXorKey);
-    const auto MulOpr = IRB.CreateMul(Key, LoadXor);
-    const auto XorOpr = IRB.CreateXor(Load, MulOpr);
-    const auto NewOpr = IRB.CreateAdd(Key, XorOpr);
-    return NewOpr;
-  }
-
-  Value *createConstantIntEncrypt3(BasicBlock::iterator ip, ConstantInt *CIT) {
-    const auto          Module = ip->getModule();
-    IRBuilder<NoFolder> IRB(ip->getContext());
-    IRB.SetInsertPoint(ip);
-
-    const auto Key = ConstantInt::get(CIT->getType(),
-                                      RandomEngine.get_uint64_t());
-    auto XorKey = ConstantInt::get(CIT->getType(),
-                                         RandomEngine.get_uint64_t());
-
-    const auto MulXorKey = ConstantExpr::getMul(Key, XorKey);
-
-    auto Enc = ConstantExpr::getSub(CIT, Key);
-    Enc = ConstantExpr::getXor(Enc, MulXorKey);
-
-    XorKey = ConstantExpr::getNeg(XorKey);
-    XorKey = ConstantExpr::getXor(XorKey, Enc);
-    XorKey = ConstantExpr::getNeg(XorKey);
-
-    auto GV = new GlobalVariable(*Module, Enc->getType(), false,
-                                 GlobalValue::LinkageTypes::PrivateLinkage,
-                                 Enc);
-    appendToCompilerUsed(*Module, {GV});
-
-    auto GXorKey = new GlobalVariable(*Module, XorKey->getType(), false,
-                                      GlobalValue::LinkageTypes::PrivateLinkage,
-                                      XorKey);
-    appendToCompilerUsed(*Module, {GXorKey});
-
-    // outs() << I << " ->\n";
-    const auto Load = IRB.CreateLoad(Enc->getType(), GV);
-    const auto LoadXor = IRB.CreateLoad(XorKey->getType(), GXorKey);
-    const auto XorKeyNegOpr = IRB.CreateNeg(LoadXor);
-    const auto XorKeyXorEnc = IRB.CreateXor(XorKeyNegOpr, Load);
-    const auto FinalXor = IRB.CreateNeg(XorKeyXorEnc);
-
-    const auto MulOpr = IRB.CreateMul(Key, FinalXor);
-    const auto XorOpr = IRB.CreateXor(Load, MulOpr);
-    const auto NewOpr = IRB.CreateAdd(Key, XorOpr);
-    return NewOpr;
+          for (unsigned i = 0; i < (PHI ? PHI->getNumIncomingValues() : I.getNumOperands()); ++i) {
+            if (CI && CI->isBundleOperand(i)) {
+              continue;
+            }
+            if (GEP && (i < 2 || GEP->getSourceElementType()->isStructTy())) {
+              continue;
+            }
+            if (PHI && isa<SwitchInst>(PHI->getIncomingBlock(i)->getTerminator())) {
+              continue;
+            }
+            Value* Opr = PHI ? PHI->getIncomingValue(i) : I.getOperand(i);
+            auto CTI = dyn_cast<ConstantInt>(Opr);
+            if (CTI && CTI->getBitWidth() > 7) {
+              FunctionModifyIRs[&F].emplace(&I);
+              break;
+            }
+          }
+        }
+      }
+    }
+    return Changed;
   }
 
   bool runOnFunction(Function &F) override {
@@ -162,51 +86,44 @@ struct ConstantIntEncryption : public FunctionPass {
     if (!opt.isEnabled()) {
       return false;
     }
+    auto& FuncModifyIRs = FunctionModifyIRs[&F];
+    if (FunctionModifyIRs.empty()) {
+      return false;
+    }
 
-    bool Changed = expandConstantExpr(F);
+    for (auto I : FuncModifyIRs) {
+      auto CI = dyn_cast<CallInst>(I);
+      auto GEP = dyn_cast<GetElementPtrInst>(I);
+      auto PHI = dyn_cast<PHINode>(I);
 
-    for (auto &BB : F) {
-      for (auto &I : BB) {
-        if (I.isEHPad() || isa<AllocaInst>(&I) || isa<IntrinsicInst>(&I) ||
-            isa<SwitchInst>(&I) || I.isAtomic()) {
+      for (unsigned i = 0; i < I->getNumOperands(); ++i) {
+        if (CI && CI->isBundleOperand(i)) {
           continue;
         }
-        auto CI = dyn_cast<CallInst>(&I);
-        auto GEP = dyn_cast<GetElementPtrInst>(&I);
-        auto IsPhi = isa<PHINode>(&I);
-        auto InsertPt = IsPhi
-                          ? F.getEntryBlock().getFirstInsertionPt()
-                          : I.getIterator();
-
-        for (unsigned i = 0; i < I.getNumOperands(); ++i) {
-          if (CI && CI->isBundleOperand(i)) {
-            continue;
-          }
-          if (GEP && (i < 2 || GEP->getSourceElementType()->isStructTy())) {
-            continue;
-          }
-          auto Opr = I.getOperand(i);
-          if (auto CIT = dyn_cast<ConstantInt>(Opr)) {
-            Value *NewOpr;
-            if (opt.level() == 0) {
-              NewOpr = createConstantIntEncrypt0(InsertPt, CIT);
-            } else if (opt.level() == 1) {
-              NewOpr = createConstantIntEncrypt1(InsertPt, CIT);
-            } else if (opt.level() == 2) {
-              NewOpr = createConstantIntEncrypt2(InsertPt, CIT);
-            } else {
-              NewOpr = createConstantIntEncrypt3(InsertPt, CIT);
-            }
-
-            I.setOperand(i, NewOpr);
-            // outs() << I << "\n\n";
-            Changed = true;
-          }
+        if (GEP && i < 2) {
+          continue;
         }
+        Value* Opr = I->getOperand(i);
+        if (auto CTI = dyn_cast<ConstantInt>(Opr)) {
+          if (CTI->getBitWidth() < 4) {
+            continue;
+          }
+          if (PHI && isa<SwitchInst>(PHI->getIncomingBlock(i)->getTerminator())) {
+            continue;
+          }
 
+          auto InsertPoint = PHI ?
+                               PHI->getIncomingBlock(i)->getTerminator() :
+                               I;
+          auto CipherConstant = encryptConstant(CTI, InsertPoint, &RandomEngine, opt.level());
+          if (PHI)
+            PHI->setIncomingValue(i, CipherConstant);
+          else
+            I->setOperand(i, CipherConstant);
+        }
       }
     }
-    return Changed;
+    return true;
   }
 };
 } // namespace llvm
