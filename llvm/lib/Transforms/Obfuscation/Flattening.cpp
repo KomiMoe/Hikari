@@ -115,18 +115,15 @@ bool Flattening::flatten(Function *f, const ObfOpt& opt) {
     br = cast<BranchInst>(insert->getTerminator());
   }
 
-  if ((br != NULL && br->isConditional()) ||
-      insert->getTerminator()->getNumSuccessors() > 1) {
-    BasicBlock::iterator i = insert->end();
-        --i;
+  BasicBlock::iterator splitPos = insert->end();
+  --splitPos;
 
-    if (insert->size() > 1) {
-      --i;
-    }
-
-    BasicBlock *tmpBB = insert->splitBasicBlock(i, "first");
-    origBB.insert(origBB.begin(), tmpBB);
+  if (insert->size() > 1) {
+    --splitPos;
   }
+
+  BasicBlock *bbEndOfEntry = insert->splitBasicBlock(splitPos, "first");
+  origBB.insert(origBB.begin(), bbEndOfEntry);
 
   // Remove jump
   insert->getTerminator()->eraseFromParent();
