@@ -40,7 +40,9 @@ struct IndirectBranch : public FunctionPass {
 
   void NumberBasicBlock(Module &M) {
     for (auto &F : M) {
-      if (F.empty() || F.hasLinkOnceLinkage() || F.getSection() == ".text.startup") {
+      if (F.empty() || F.isWeakForLinker() ||
+          F.getSection() == ".text.startup" ||
+          F.isIntrinsic()) {
         continue;
       }
       SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions(nullptr, nullptr));
@@ -144,16 +146,19 @@ struct IndirectBranch : public FunctionPass {
         IRBuilder<> IRB(BI);
 
         auto Cond = BI->getCondition();
-        auto TBB = BlockAddress::get(BI->getSuccessor(0));
-        auto FBB = BlockAddress::get(BI->getSuccessor(1));
+
+        auto TBB = BI->getSuccessor(0);
+        auto FBB = BI->getSuccessor(1);
+        auto AddrTBB = BlockAddress::get(TBB);
+        auto AddrFBB = BlockAddress::get(FBB);
 
         auto TIndex = opt.level() ?
-                        ConstantInt::get(Int32Ty, FuncBBIndex[TBB]) :
-                        ConstantInt::get(Int32Ty, BBIndex[TBB]);
+                        ConstantInt::get(Int32Ty, FuncBBIndex[AddrTBB]) :
+                        ConstantInt::get(Int32Ty, BBIndex[AddrTBB]);
 
         auto FIndex = opt.level() ?
-                        ConstantInt::get(Int32Ty, FuncBBIndex[FBB]) :
-                        ConstantInt::get(Int32Ty, BBIndex[FBB]);
+                        ConstantInt::get(Int32Ty, FuncBBIndex[AddrFBB]) :
+                        ConstantInt::get(Int32Ty, BBIndex[AddrFBB]);
 
         auto NextIndex = IRB.CreateSelect(Cond, TIndex, FIndex);
 
@@ -166,14 +171,14 @@ struct IndirectBranch : public FunctionPass {
         buildDecrypt.LoadTy = PointerType::getUnqual(Ctx);
         buildDecrypt.ModulePageTable = &BBPageTable;
         buildDecrypt.FuncPageTable = &FuncBBPageTable;
-        buildDecrypt.ModuleKey = BBKeys[TBB];
-        buildDecrypt.FuncKey = FuncKeys[TBB];
+        buildDecrypt.ModuleKey = BBKeys[AddrTBB];
+        buildDecrypt.FuncKey = FuncKeys[AddrTBB];
 
         auto TargetPtr = buildPageTableDecryptIR(buildDecrypt);
         IndirectBrInst *IBI = IndirectBrInst::Create(TargetPtr, 2);
-        IBI->addDestination(BI->getSuccessor(0));
-        IBI->addDestination(BI->getSuccessor(1));
         ReplaceInstWithInst(BI, IBI);
+        IBI->addDestination(TBB);
+        IBI->addDestination(FBB);
 
         RunOnFuncChanged = true;
       }
