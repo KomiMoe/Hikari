@@ -45,7 +45,6 @@
 #include "llvm/Transforms/Utils.h"
 #include "llvm/Transforms/Utils/SymbolRewriter.h"
 #include "llvm/Transforms/Vectorize/LoadStoreVectorizer.h"
-#include "llvm/Transforms/Obfuscation/ObfuscationPassManager.h"
 #include <cstdlib>
 
 namespace {
@@ -143,7 +142,6 @@ struct ForcePassLinking {
     (void)llvm::createUnifyLoopExitsPass();
     (void)llvm::createFixIrreduciblePass();
     (void)llvm::createSelectOptimizePass();
-    (void)llvm::createObfuscationPassManager();
 
     (void)new llvm::ScalarEvolutionWrapperPass();
     llvm::Function::Create(nullptr, llvm::GlobalValue::ExternalLinkage)
