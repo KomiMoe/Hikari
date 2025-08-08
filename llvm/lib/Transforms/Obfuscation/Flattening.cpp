@@ -18,6 +18,9 @@
 #include "llvm/CryptoUtils.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Transforms/Obfuscation/ObfuscationOptions.h"
+#include "llvm/IR/IRBuilder.h"
+
+#include <random>
 
 #define DEBUG_TYPE "flattening"
 
@@ -29,62 +32,67 @@ STATISTIC(Flattened, "Functions flattened");
 
 namespace {
 struct Flattening : public FunctionPass {
-  unsigned pointerSize;
-  static char ID;  // Pass identification, replacement for typeid
-  
-  ObfuscationOptions *ArgsOptions;
-  CryptoUtils RandomEngine;
+  unsigned    pointerSize;
+  static char ID; // Pass identification, replacement for typeid
 
-  Flattening(unsigned pointerSize, ObfuscationOptions *argsOptions) : FunctionPass(ID) {
+  ObfuscationOptions *ArgsOptions;
+  CryptoUtils         RandomEngine;
+
+  Flattening(unsigned            pointerSize,
+             ObfuscationOptions *argsOptions) : FunctionPass(ID) {
     this->pointerSize = pointerSize;
     this->ArgsOptions = argsOptions;
   }
 
   bool runOnFunction(Function &F) override;
-  bool flatten(Function *f, const ObfOpt& opt);
+  bool flatten(Function *f, const ObfOpt &opt);
 };
 }
 
 bool Flattening::runOnFunction(Function &F) {
+  if (F.isIntrinsic()) {
+    return false;
+  }
   Function *tmp = &F;
-  bool result = false;
+  bool      result = false;
   // Do we obfuscate
   const auto opt = ArgsOptions->toObfuscate(ArgsOptions->flaOpt(), &F);
   if (!opt.isEnabled()) {
     return result;
   }
   if (flatten(tmp, opt)) {
-      ++Flattened;
-      result = true;
-    }
+    ++Flattened;
+    result = true;
+  }
 
   return result;
 }
 
-bool Flattening::flatten(Function *f, const ObfOpt& opt) {
+bool Flattening::flatten(Function *f, const ObfOpt &opt) {
   vector<BasicBlock *> origBB;
-  BasicBlock *loopEntry;
-  BasicBlock *loopEnd;
-  LoadInst *load;
-  SwitchInst *switchI;
-  AllocaInst *switchVar;
+
+  auto &Ctx = f->getContext();
+  auto  intType = Type::getInt32Ty(Ctx);
+
+  if (pointerSize == 8) {
+    intType = Type::getInt64Ty(Ctx);
+  }
 
   // SCRAMBLER
   char scrambling_key[16];
-  llvm::cryptoutils->get_bytes(scrambling_key, 16);
+  cryptoutils->get_bytes(scrambling_key, 16);
   // END OF SCRAMBLER
 
   // Lower switch
-  FunctionPass *lower = createLegacyLowerSwitchPass();
+  auto lower = createLegacyLowerSwitchPass();
   lower->runOnFunction(*f);
 
   // Save all original BB
-  for (Function::iterator i = f->begin(); i != f->end(); ++i) {
-    BasicBlock *tmp = &*i;
-    origBB.push_back(tmp);
+  for (auto i = f->begin(); i != f->end(); ++i) {
+    auto bb = &*i;
+    origBB.push_back(bb);
 
-    BasicBlock *bb = &*i;
-    if (isa<InvokeInst>(bb->getTerminator())) {
+    if (isa<InvokeInst>(bb->getTerminator()) || bb->isEHPad()) {
       return false;
     }
   }
@@ -94,205 +102,214 @@ bool Flattening::flatten(Function *f, const ObfOpt& opt) {
     return false;
   }
 
-  LLVMContext &Ctx = f->getContext();
-  IntegerType* intType = Type::getInt32Ty(Ctx);
-  if (pointerSize == 8) {
-    intType = Type::getInt64Ty(Ctx);
-  }
-
-  Value *MySecret = ConstantInt::get(intType, 0, true);
-
   // Remove first BB
   origBB.erase(origBB.begin());
 
   // Get a pointer on the first BB
-  Function::iterator tmp = f->begin();  //++tmp;
-  BasicBlock *insert = &*tmp;
+  auto insertBlock = &*(f->begin());
 
-  // If main begin with an if
-  BranchInst *br = NULL;
-  if (isa<BranchInst>(insert->getTerminator())) {
-    br = cast<BranchInst>(insert->getTerminator());
-  }
+  auto splitPos = --(insertBlock->end());
 
-  BasicBlock::iterator splitPos = insert->end();
-  --splitPos;
-
-  if (insert->size() > 1) {
+  if (insertBlock->size() > 1) {
     --splitPos;
   }
 
-  BasicBlock *bbEndOfEntry = insert->splitBasicBlock(splitPos, "first");
+  std::mt19937_64 re(RandomEngine.get_uint64_t());
+  std::shuffle(origBB.begin(), origBB.end(), re);
+
+  auto bbEndOfEntry = insertBlock->splitBasicBlock(splitPos, "first");
   origBB.insert(origBB.begin(), bbEndOfEntry);
 
   // Remove jump
-  insert->getTerminator()->eraseFromParent();
+  insertBlock->getTerminator()->eraseFromParent();
 
   // Create switch variable and set as it
-  switchVar =
-      new AllocaInst(intType, 0, "switchVar", insert);
+  IRBuilder<> IRB{insertBlock};
+  const auto  switchVar = IRB.CreateAlloca(intType, nullptr, "switchVar");
+  const auto  switchXorVar = IRB.CreateAlloca(intType, nullptr, "switchXor");
+
+
+  ConstantInt *entryRandomXor = cast<ConstantInt>(
+      ConstantInt::get(intType, RandomEngine.get_uint64_t()));
   if (pointerSize == 8) {
-    new StoreInst(
-      ConstantInt::get(intType,
-        llvm::cryptoutils->scramble64(0, scrambling_key)),
-      switchVar, insert);
+    auto xorKey = ConstantExpr::getXor(
+        entryRandomXor,
+        ConstantInt::get(intType, cryptoutils->scramble64(0, scrambling_key)));
+
+    IRB.CreateStore(xorKey, switchVar, true);
   } else {
-    new StoreInst(
-      ConstantInt::get(intType,
-        llvm::cryptoutils->scramble32(0, scrambling_key)),
-      switchVar, insert);
+    auto xorKey = ConstantExpr::getXor(
+        entryRandomXor,
+        ConstantInt::get(intType, cryptoutils->scramble32(0, scrambling_key)));
+
+    IRB.CreateStore(xorKey, switchVar, true);
   }
+  IRB.CreateStore(entryRandomXor, switchXorVar, true);
 
   // Create main loop
-  loopEntry = BasicBlock::Create(f->getContext(), "loopEntry", f, insert);
-  loopEnd = BasicBlock::Create(f->getContext(), "loopEnd", f, insert);
 
-  load = new LoadInst(intType, switchVar, "switchVar", loopEntry);
-
+  auto bbLoopEntry = BasicBlock::Create(f->getContext(), "loopEntry", f,
+                                        insertBlock);
+  auto bbLoopEnd = BasicBlock::Create(f->getContext(), "loopEnd", f,
+                                      insertBlock);
+  IRB.SetInsertPoint(bbLoopEntry);
+  auto switchVarLoad = IRB.CreateLoad(intType, switchVar, "switchVar");
+  auto switchXorLoad = IRB.CreateLoad(intType, switchXorVar, "switchXor");
+  auto switchCondition = IRB.CreateXor(switchVarLoad, switchXorLoad);
   // Move first BB on top
-  insert->moveBefore(loopEntry);
-  BranchInst::Create(loopEntry, insert);
+  insertBlock->moveBefore(bbLoopEntry);
+  BranchInst::Create(bbLoopEntry, insertBlock);
 
   // loopEnd jump to loopEntry
-  BranchInst::Create(loopEntry, loopEnd);
+  BranchInst::Create(bbLoopEntry, bbLoopEnd);
 
-  BasicBlock *swDefault =
-      BasicBlock::Create(f->getContext(), "switchDefault", f, loopEnd);
-  BranchInst::Create(loopEnd, swDefault);
+  auto swDefault = BasicBlock::Create(f->getContext(), "switchDefault", f,
+                                      bbLoopEnd);
+  BranchInst::Create(bbLoopEnd, swDefault);
 
   // Create switch instruction itself and set condition
-  switchI = SwitchInst::Create(&*f->begin(), swDefault, 0, loopEntry);
-  switchI->setCondition(load);
+  auto switchI = SwitchInst::Create(&*f->begin(), swDefault, 0, bbLoopEntry);
+  switchI->setCondition(switchCondition);
 
   // Remove branch jump from 1st BB and make a jump to the while
   f->begin()->getTerminator()->eraseFromParent();
 
-  BranchInst::Create(loopEntry, &*f->begin());
+  BranchInst::Create(bbLoopEntry, &*f->begin());
 
   // Put all BB in the switch
-  for (vector<BasicBlock *>::iterator b = origBB.begin(); b != origBB.end();
-       ++b) {
-    BasicBlock *i = *b;
-    ConstantInt *numCase = NULL;
-
-    // Move the BB inside the switch (only visual, no code logic)
-    i->moveBefore(loopEnd);
-
+  for (auto bi = origBB.begin(); bi != origBB.end(); ++bi) {
+    const auto   bb = *bi;
+    ConstantInt *numToCase;
     // Add case to switch
     if (pointerSize == 8) {
-      numCase = cast<ConstantInt>(ConstantInt::get(
-          switchI->getCondition()->getType(),
-          llvm::cryptoutils->scramble64(switchI->getNumCases(), scrambling_key)));
+      numToCase = cast<ConstantInt>(ConstantInt::get(
+          intType,
+          cryptoutils->scramble64(switchI->getNumCases(), scrambling_key)));
     } else {
-      numCase = cast<ConstantInt>(ConstantInt::get(
-        switchI->getCondition()->getType(),
-        llvm::cryptoutils->scramble32(switchI->getNumCases(), scrambling_key)));
+      numToCase = cast<ConstantInt>(ConstantInt::get(
+          intType,
+          cryptoutils->scramble32(switchI->getNumCases(), scrambling_key)));
     }
-    switchI->addCase(numCase, i);
+
+    // Move the BB inside the switch (only visual, no code logic)
+    bb->moveBefore(bbLoopEnd);
+
+    switchI->addCase(numToCase, bb);
   }
 
-  ConstantInt *Zero = ConstantInt::get(intType, 0);
   // Recalculate switchVar
-  for (vector<BasicBlock *>::iterator b = origBB.begin(); b != origBB.end();
-       ++b) {
-    BasicBlock *i = *b;
-    ConstantInt *numCase = NULL;
+  for (auto bi = origBB.begin(); bi != origBB.end(); ++bi) {
+    const auto bb = *bi;
 
     // Ret BB
-    if (i->getTerminator()->getNumSuccessors() == 0) {
+    if (bb->getTerminator()->getNumSuccessors() == 0) {
       continue;
     }
 
+    IRB.SetInsertPoint(bb->getTerminator());
     // If it's a non-conditional jump
-    if (i->getTerminator()->getNumSuccessors() == 1) {
+    if (bb->getTerminator()->getNumSuccessors() == 1) {
       // Get successor and delete terminator
-      BasicBlock *succ = i->getTerminator()->getSuccessor(0);
-      i->getTerminator()->eraseFromParent();
+      auto tbb = bb->getTerminator()->getSuccessor(0);
 
       // Get next case
-      numCase = switchI->findCaseDest(succ);
+      auto numToCase = switchI->findCaseDest(tbb);
 
       // If next case == default case (switchDefault)
-      if (numCase == NULL) {
+      if (numToCase == nullptr) {
         if (pointerSize == 8) {
-          numCase = cast<ConstantInt>(
-              ConstantInt::get(switchI->getCondition()->getType(),
-                               llvm::cryptoutils->scramble64(
-                                   switchI->getNumCases() - 1, scrambling_key)));
+          numToCase = cast<ConstantInt>(
+              ConstantInt::get(
+                  intType,
+                  cryptoutils->scramble64(
+                      switchI->getNumCases() - 1,
+                      scrambling_key)));
         } else {
-          numCase = cast<ConstantInt>(
-            ConstantInt::get(switchI->getCondition()->getType(),
-              llvm::cryptoutils->scramble32(
-                switchI->getNumCases() - 1, scrambling_key)));
+          numToCase = cast<ConstantInt>(
+              ConstantInt::get(
+                  intType,
+                  llvm::cryptoutils->scramble32(
+                      switchI->getNumCases() - 1,
+                      scrambling_key)));
         }
       }
 
-      // numCase = MySecret - (MySecret - numCase)
-      // X = MySecret - numCase
-      Constant *X = ConstantExpr::getSub(Zero, numCase);
-      Value *newNumCase = BinaryOperator::Create(Instruction::Sub, MySecret, X, "", i);
+      ConstantInt *randomXor = cast<ConstantInt>(
+          ConstantInt::get(intType, RandomEngine.get_uint64_t()));
+
+      auto xorKey = ConstantExpr::getXor(randomXor, numToCase);
 
       // Update switchVar and jump to the end of loop
-      new StoreInst(newNumCase, load->getPointerOperand(), i);
-      BranchInst::Create(loopEnd, i);
+      IRB.CreateStore(xorKey, switchVar, true);
+      IRB.CreateStore(randomXor, switchXorVar, true);
+      IRB.CreateBr(bbLoopEnd);
+      bb->getTerminator()->eraseFromParent();
       continue;
     }
 
     // If it's a conditional jump
-    if (i->getTerminator()->getNumSuccessors() == 2) {
+    if (bb->getTerminator()->getNumSuccessors() == 2) {
       // Get next cases
-      ConstantInt *numCaseTrue =
-          switchI->findCaseDest(i->getTerminator()->getSuccessor(0));
-      ConstantInt *numCaseFalse =
-          switchI->findCaseDest(i->getTerminator()->getSuccessor(1));
+      auto numToCaseTrue =
+          switchI->findCaseDest(bb->getTerminator()->getSuccessor(0));
+      auto numToCaseFalse =
+          switchI->findCaseDest(bb->getTerminator()->getSuccessor(1));
 
       // Check if next case == default case (switchDefault)
-      if (numCaseTrue == NULL) {
+      if (numToCaseTrue == nullptr) {
+
         if (pointerSize == 8) {
-          numCaseTrue = cast<ConstantInt>(
-              ConstantInt::get(switchI->getCondition()->getType(),
-                               llvm::cryptoutils->scramble64(
-                                   switchI->getNumCases() - 1, scrambling_key)));
+          numToCaseTrue = cast<ConstantInt>(
+              ConstantInt::get(
+                  intType,
+                  llvm::cryptoutils->scramble64(
+                      switchI->getNumCases() - 1,
+                      scrambling_key)));
         } else {
-          numCaseTrue = cast<ConstantInt>(
-            ConstantInt::get(switchI->getCondition()->getType(),
-              llvm::cryptoutils->scramble32(
-                switchI->getNumCases() - 1, scrambling_key)));
+          numToCaseTrue = cast<ConstantInt>(
+              ConstantInt::get(
+                  intType,
+                  llvm::cryptoutils->scramble32(
+                      switchI->getNumCases() - 1,
+                      scrambling_key)));
         }
       }
 
-      if (numCaseFalse == NULL) {
+      if (numToCaseFalse == nullptr) {
         if (pointerSize == 8) {
-          numCaseFalse = cast<ConstantInt>(
-              ConstantInt::get(switchI->getCondition()->getType(),
-                               llvm::cryptoutils->scramble64(
-                                   switchI->getNumCases() - 1, scrambling_key)));
+          numToCaseFalse = cast<ConstantInt>(
+              ConstantInt::get(
+                  intType,
+                  llvm::cryptoutils->scramble64(
+                      switchI->getNumCases() - 1,
+                      scrambling_key)));
         } else {
-          numCaseFalse = cast<ConstantInt>(
-            ConstantInt::get(switchI->getCondition()->getType(),
-              llvm::cryptoutils->scramble32(
-                switchI->getNumCases() - 1, scrambling_key)));
+          numToCaseFalse = cast<ConstantInt>(
+              ConstantInt::get(
+                  intType,
+                  llvm::cryptoutils->scramble32(
+                      switchI->getNumCases() - 1,
+                      scrambling_key)));
         }
       }
 
-      Constant *X, *Y;
-      X = ConstantExpr::getSub(Zero, numCaseTrue);
-      Y = ConstantExpr::getSub(Zero, numCaseFalse);
-      Value *newNumCaseTrue = BinaryOperator::Create(Instruction::Sub, MySecret, X, "", i->getTerminator());
-      Value *newNumCaseFalse = BinaryOperator::Create(Instruction::Sub, MySecret, Y, "", i->getTerminator());
+      ConstantInt *randomXor = cast<ConstantInt>(
+          ConstantInt::get(intType, RandomEngine.get_uint64_t()));
+
+      auto xorKeyT = ConstantExpr::getXor(numToCaseTrue, randomXor);
+      auto xorKeyF = ConstantExpr::getXor(numToCaseFalse, randomXor);
+      IRB.CreateStore(randomXor, switchXorVar, true);
 
       // Create a SelectInst
-      BranchInst *br = cast<BranchInst>(i->getTerminator());
-      SelectInst *sel =
-          SelectInst::Create(br->getCondition(), newNumCaseTrue, newNumCaseFalse, "",
-                             i->getTerminator());
-
-      // Erase terminator
-      i->getTerminator()->eraseFromParent();
+      auto br = cast<BranchInst>(bb->getTerminator());
+      auto sel = IRB.CreateSelect(br->getCondition(), xorKeyT, xorKeyF);
 
       // Update switchVar and jump to the end of loop
-      new StoreInst(sel, load->getPointerOperand(), i);
-      BranchInst::Create(loopEnd, i);
+      IRB.CreateStore(sel, switchVar, true);
+      IRB.CreateBr(bbLoopEnd);
+
+      // Erase terminator
+      bb->getTerminator()->eraseFromParent();
       continue;
     }
   }
@@ -305,8 +322,10 @@ bool Flattening::flatten(Function *f, const ObfOpt& opt) {
   return true;
 }
 
-char Flattening::ID = 0;
+char                            Flattening::ID = 0;
 static RegisterPass<Flattening> X("flattening", "Call graph flattening");
-FunctionPass *llvm::createFlatteningPass(unsigned pointerSize, ObfuscationOptions *argsOptions) {
+
+FunctionPass *llvm::createFlatteningPass(unsigned            pointerSize,
+                                         ObfuscationOptions *argsOptions) {
   return new Flattening(pointerSize, argsOptions);
 }
