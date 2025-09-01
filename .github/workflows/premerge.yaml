@@ -31,7 +31,7 @@ jobs:
     runs-on: llvm-premerge-linux-runners
     steps:
       - name: Checkout LLVM
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 2
       - name: Setup ccache
@@ -92,7 +92,7 @@ jobs:
         shell: bash
     steps:
       - name: Checkout LLVM
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 2
       - name: Setup ccache
@@ -151,7 +151,7 @@ jobs:
       (github.event_name != 'pull_request' || github.event.action != 'closed')
     steps:
       - name: Checkout LLVM
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5.0.0
         with:
           fetch-depth: 2
       - name: Setup ccache
