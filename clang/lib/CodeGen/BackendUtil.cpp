@@ -1266,6 +1266,7 @@ void EmitAssemblyHelper::RunCodegenPipeline(
 void EmitAssemblyHelper::emitAssembly(BackendAction Action,
                                       std::unique_ptr<raw_pwrite_stream> OS,
                                       BackendConsumer *BC) {
+  outs() << TheModule->getName() << "\n";
   setCommandLineOpts(CodeGenOpts);
 
   bool RequiresCodeGen = actionRequiresCodeGen(Action);
