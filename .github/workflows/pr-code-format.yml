@@ -19,13 +19,13 @@ jobs:
     if: github.repository == 'llvm/llvm-project'
     steps:
       - name: Fetch LLVM sources
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 2
 
       - name: Get changed files
         id: changed-files
-        uses: step-security/changed-files@3dbe17c78367e7d60f00d78ae6781a35be47b4a1 # v45.0.1
+        uses: step-security/changed-files@95b56dadb92a30ca9036f16423fd3c088a71ee94 # v46.0.5
         with:
           separator: ","
           skip_initial_fetch: true
@@ -35,7 +35,7 @@ jobs:
       # We need to pull the script from the main branch, so that we ensure
       # we get the latest version of this script.
       - name: Fetch code formatting utils
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           repository: ${{ github.repository }}
           ref: ${{ github.base_ref }}
@@ -53,12 +53,12 @@ jobs:
           echo "$CHANGED_FILES"
 
       - name: Install clang-format
-        uses: aminya/setup-cpp@17c11551771948abc5752bbf3183482567c7caf0 # v1.1.1
+        uses: aminya/setup-cpp@a276e6e3d1db9160db5edc458e99a30d3b109949 # v1.7.1
         with:
           clangformat: 20.1.8
 
       - name: Setup Python env
-        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -84,7 +84,7 @@ jobs:
             --end-rev HEAD \
             --changed-files "$CHANGED_FILES"
 
-      - uses: actions/upload-artifact@26f96dfa697d77e81fd5907df203aa23a56210a8 #v4.3.0
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 #v4.6.2
         if: always()
         with:
           name: workflow-args
