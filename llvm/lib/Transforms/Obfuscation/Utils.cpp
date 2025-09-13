@@ -465,7 +465,7 @@ Value * encryptConstant(Constant *plainConstant, Instruction *insertBefore, Cryp
     XorKey = ConstantInt::get(Key->getType(), randomEngine->get_uint64_t());
     Enc = ConstantExpr::getXor(Enc, XorKey);
     if (level > 1) {
-      Enc = ConstantExpr::getXor(Enc, ConstantExpr::getMul(XorKey, Key));
+      Enc = ConstantExpr::getXor(Enc, ConstantExpr::get(Instruction::Mul, XorKey, Key));
     }
     if (level > 2) {
       Enc = ConstantExpr::getXor(Enc, ConstantExpr::getNeg(XorKey));

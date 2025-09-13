@@ -273,10 +273,13 @@ Function *StringEncryption::buildDecryptFunction(Module *M, const StringEncrypti
   ++ArgIt;
   Argument *Data = ArgIt;       // input
 
+  AttrBuilder NoCaptureAttrBuilder{Ctx};
+  NoCaptureAttrBuilder.addCapturesAttr(llvm::CaptureInfo::none());
+
   PlainString->setName("plain_string");
-  PlainString->addAttr(Attribute::NoCapture);
+  PlainString->addAttrs(NoCaptureAttrBuilder);
   Data->setName("data");
-  Data->addAttr(Attribute::NoCapture);
+  Data->addAttrs(NoCaptureAttrBuilder);
 
   BasicBlock *Enter = BasicBlock::Create(Ctx, "Enter", DecFunc);
   BasicBlock *LoopBody = BasicBlock::Create(Ctx, "LoopBody", DecFunc);
@@ -370,8 +373,11 @@ Function *StringEncryption::buildInitFunction(Module *M, const StringEncryption:
   auto ArgIt = InitFunc->arg_begin();
   Argument *thiz = ArgIt;
 
+
+  AttrBuilder NoCaptureAttrBuilder{Ctx};
+  NoCaptureAttrBuilder.addCapturesAttr(llvm::CaptureInfo::none());
   thiz->setName("this");
-  thiz->addAttr(Attribute::NoCapture);
+  thiz->addAttrs(NoCaptureAttrBuilder);
 
   // convert constant initializer into a series of instructions
   BasicBlock *Enter = BasicBlock::Create(Ctx, "Enter", InitFunc);
