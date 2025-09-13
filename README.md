@@ -19,14 +19,6 @@
   <img src="https://img.shields.io/github/license/KomiMoe/Arkari?"/> 
  </a>
 </p>
-<p align="center">
- <a helf="https://github.com/KomiMoe/Arkari/releases">
-  <img alt="GitHub Downloads (all assets, all releases)" src="https://img.shields.io/github/downloads/KomiMoe/Arkari/total">
- </a>
- <a helf="https://github.com/KomiMoe/Arkari/releases">
-  <img alt="GitHub Release" src="https://img.shields.io/github/v/release/KomiMoe/Arkari">
- </a>
-</p>
 <h3 align="center">Yet another llvm based obfuscator based on goron</h3>
 
 ## 介绍
